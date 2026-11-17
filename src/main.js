@@ -1,62 +1,44 @@
 import './style.css'
 import { createLoop } from './loop.js'
 import { createInput, readShipCommand } from './input.js'
-import { cloneShip, copyShip, createShip, integrate } from './sim/ship.js'
-import { createArena, hideWrapForLerp, wrap } from './sim/arena.js'
+import { createArena } from './sim/arena.js'
+import { World } from './sim/world.js'
 import { createCanvas } from './render/canvas.js'
 import {
   createStarfield,
   drawBackground,
   drawGrid,
   drawHud,
-  drawShip,
   drawStarfield,
-  interpolateShip,
+  drawWorld,
 } from './render/draw.js'
 
+const canvasEl = document.querySelector('#game')
 const input = createInput(window)
 const arena = createArena()
-const ship = createShip()
-const previous = cloneShip(ship)
-const command = { turn: 0, thrust: false }
-const renderShip = { x: 0, y: 0, angle: 0, thrust: 0 }
+const world = new World(arena)
+const command = { turn: 0, thrust: false, fire: false, fireHoming: false }
 
 let stars = []
 let lastAlpha = 0
 
-function resetShipToCenter() {
-  ship.x = arena.width / 2
-  ship.y = arena.height / 2
-  ship.vx = 0
-  ship.vy = 0
-  ship.angle = -Math.PI / 2
-  ship.thrust = 0
-  copyShip(previous, ship)
-}
-
-const { ctx, size } = createCanvas(document.querySelector('#game'), {
+const { ctx, size } = createCanvas(canvasEl, {
   onResize({ w, h }) {
     arena.width = w
     arena.height = h
-    wrap(ship, arena)
-    copyShip(previous, ship)
     stars = createStarfield(w, h)
   },
 })
 
-resetShipToCenter()
+world.reset()
 
 function simulate(dt) {
-  copyShip(previous, ship)
-
   if (input.justPressed('KeyR')) {
-    resetShipToCenter()
+    world.reset()
   }
 
   readShipCommand(input, command)
-  integrate(ship, command, dt)
-  wrap(ship, arena)
-  hideWrapForLerp(previous, ship, arena)
+  world.step(dt, command)
   input.consume()
 }
 
@@ -65,8 +47,8 @@ function render(alpha, stats, paused = false) {
   drawBackground(ctx, size.w, size.h)
   drawGrid(ctx, size.w, size.h)
   drawStarfield(ctx, stars)
-  drawShip(ctx, interpolateShip(previous, ship, alpha, renderShip))
-  drawHud(ctx, stats, { paused })
+  drawWorld(ctx, world, alpha)
+  drawHud(ctx, stats, world, { paused })
 }
 
 const loop = createLoop({
@@ -75,9 +57,18 @@ const loop = createLoop({
 })
 loop.start()
 
-// У Lab 1 Пробіл — пауза; у Lab 2 перенесемо паузу на KeyP, а Пробіл віддамо під стрільбу.
+// Клік по canvas робить постріл.
+// Наївне `canvasEl.addEventListener('pointerdown', player.fire)` ламає `this`
+// (браузер викликає обробник із `this === canvasEl`), плюс втрачає зв'язок після респауну.
+// Стрілкова обгортка щоразу викликає метод на поточному екземплярі корабля (implicit binding).
+canvasEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || !loop.isRunning()) return
+  const player = world.getPlayer()
+  if (player) player.fire(world)
+})
+
 window.addEventListener('keydown', (e) => {
-  if (e.code !== 'Space' || e.repeat) return
+  if (e.code !== 'KeyP' || e.repeat) return
   e.preventDefault()
 
   if (loop.isRunning()) {
