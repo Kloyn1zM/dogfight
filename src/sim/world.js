@@ -4,15 +4,13 @@ import { detectCollisions } from './collision.js'
 import { Asteroid, Explosion, Pickup } from './entities.js'
 import { Ship } from './ship.js'
 
-const TARGET_ASTEROIDS = 6
 const MAX_PICKUPS = 2
 const RESPAWN_DELAY = 2.0
 
 /**
  * Менеджер сутностей на базі Map<id, Entity>.
- * - Ітерується через for..of завдяки [Symbol.iterator].
- * - Фільтрує без проміжних масивів через генератор *ofKind(kind).
- * - Відкладено видаляє мертві сутності наприкінці кроку (safe sweep).
+ * Розв'язаний від аудіо та HUD через EventTarget (`world.events`):
+ * симуляція лише генерує події 'fired', 'hit', 'exploded', 'pickup', 'score'.
  */
 export class World {
   #entities = new Map()
@@ -21,6 +19,8 @@ export class World {
   constructor(arena, { collisionSystem = detectCollisions } = {}) {
     this.arena = arena
     this.collisionSystem = collisionSystem
+    this.events = new EventTarget()
+    this.config = { targetAsteroids: 6, homingEvery: 4 }
     this.score = 0
     this.playerId = null
     this.respawnTimer = 0
@@ -30,6 +30,10 @@ export class World {
 
   get size() {
     return this.#entities.size
+  }
+
+  emit(type, detail = {}) {
+    this.events.dispatchEvent(new CustomEvent(type, { detail }))
   }
 
   spawn(entity) {
@@ -62,7 +66,14 @@ export class World {
     }
   }
 
-  reset() {
+  reset(arenaConfig) {
+    if (arenaConfig) {
+      this.config = {
+        targetAsteroids: arenaConfig.targetAsteroids ?? 6,
+        homingEvery: arenaConfig.homingEvery ?? 4,
+      }
+    }
+
     this.#entities.clear()
     this.#pendingRemoval.clear()
     this.score = 0
@@ -78,7 +89,7 @@ export class World {
     )
     this.playerId = ship.id
 
-    for (let i = 0; i < TARGET_ASTEROIDS; i += 1) {
+    for (let i = 0; i < this.config.targetAsteroids; i += 1) {
       this.#spawnAsteroid({ homing: i === 0 })
     }
   }
@@ -88,7 +99,6 @@ export class World {
       entity.snapshotPrevious()
     }
 
-    // Респаун корабля через 2 с у безпечній точці арени
     if (this.respawnTimer > 0) {
       this.respawnTimer = Math.max(0, this.respawnTimer - dt)
       if (this.respawnTimer === 0) {
@@ -98,7 +108,6 @@ export class World {
       }
     }
 
-    // Оновлення сутностей
     const player = this.getPlayer()
     if (player && player.alive && command) {
       player.integrate(command, dt)
@@ -114,16 +123,12 @@ export class World {
       this.#applyArenaBounds(entity)
     }
 
-    // Колізії
     for (const [a, b] of this.collisionSystem(this)) {
       if (!a.alive || !b.alive) continue
       this.#resolvePair(a, b)
     }
 
-    // Підтримка популяції астероїдів та бонусів
     this.#maintainPopulation(dt)
-
-    // Безпечне видалення мертвих сутностей наприкінці кроку
     this.#sweep()
   }
 
@@ -157,10 +162,20 @@ export class World {
   #hitAsteroid(bullet, asteroid) {
     this.despawn(bullet.id)
     const destroyed = asteroid.takeDamage(bullet.damage)
+    this.emit('hit', { targetId: asteroid.id, destroyed })
+
     if (!destroyed) return
 
     this.despawn(asteroid.id)
     this.score += asteroid.points
+    this.emit('score', { delta: asteroid.points, total: this.score })
+    this.emit('exploded', {
+      kind: 'asteroid',
+      big: asteroid.radius >= 26,
+      x: asteroid.pos.x,
+      y: asteroid.pos.y,
+    })
+
     this.spawn(
       new Explosion({
         x: asteroid.pos.x,
@@ -170,7 +185,6 @@ export class World {
       }),
     )
 
-    // Великий астероїд розколюється на два менших
     if (asteroid.radius >= 26) {
       for (let i = 0; i < 2; i += 1) {
         const angle = Math.random() * Math.PI * 2
@@ -198,6 +212,7 @@ export class World {
     this.#bounceAsteroids(ship, asteroid)
 
     if (!damaged) return
+    this.emit('hit', { targetId: ship.id, destroyed: !ship.alive })
 
     this.spawn(
       new Explosion({
@@ -210,6 +225,12 @@ export class World {
     )
 
     if (!ship.alive) {
+      this.emit('exploded', {
+        kind: 'ship',
+        big: true,
+        x: ship.pos.x,
+        y: ship.pos.y,
+      })
       this.despawn(ship.id)
       this.playerId = null
       this.respawnTimer = RESPAWN_DELAY
@@ -220,6 +241,7 @@ export class World {
     const comp = getBehavior(pickup, 'pickup')
     if (comp) {
       ship.applyPickup(comp.effect, comp.duration)
+      this.emit('pickup', { effect: comp.effect, duration: comp.duration })
     }
     this.despawn(pickup.id)
   }
@@ -256,9 +278,11 @@ export class World {
     for (const a of this.ofKind('asteroid')) {
       if (a.alive) asteroidCount += 1
     }
-    if (asteroidCount < TARGET_ASTEROIDS) {
+    if (asteroidCount < this.config.targetAsteroids) {
       this.asteroidCounter += 1
-      this.#spawnAsteroid({ homing: this.asteroidCounter % 4 === 0 })
+      this.#spawnAsteroid({
+        homing: this.asteroidCounter % this.config.homingEvery === 0,
+      })
     }
 
     this.pickupTimer -= dt
@@ -270,8 +294,10 @@ export class World {
       }
       if (pickupCount < MAX_PICKUPS) {
         const margin = 60
-        const x = margin + Math.random() * Math.max(10, this.arena.width - margin * 2)
-        const y = margin + Math.random() * Math.max(10, this.arena.height - margin * 2)
+        const x =
+          margin + Math.random() * Math.max(10, this.arena.width - margin * 2)
+        const y =
+          margin + Math.random() * Math.max(10, this.arena.height - margin * 2)
         this.#spawnPickupAt(x, y)
       }
     }

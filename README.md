@@ -103,3 +103,90 @@ canvasEl.addEventListener('pointerdown', player.fire)
 
 **Обране рішення (компоненти-поведінки в `entity.behaviors`):**
 Кожна сутність тримає масив незалежних компонентів (`createHoming(...)`, `createPickupEffect(...)`), а `runBehaviors(entity, dt, world)` виконує їх під час `update`. Одна й та сама функція `createHoming` працює і для фіолетової ракети (`KeyE`), і для червоного астероїда-переслідувача, залишаючи ієрархію `extends` плоскою (максимум 1 рівень) і тривіальною для серіалізації в Lab 5.
+
+---
+
+## Lab 03 — Asynchronous JavaScript: Promises, `async`/`await`, and the Loading Screen
+
+### Що реалізовано
+- **Пайплайн завантаження (`src/assets/loader.js`):** `fetchJson` (перевіряє `response.ok` і кидає `HttpError`), `withRetry` (експоненційний backoff + jitter, без повторних спроб на `4xx`, `AbortError` та `SyntaxError`), `loadImage`, `loadAudio` (Web Audio `decodeAudioData`), `loadJson` — усі приймають `AbortSignal`. `loadAll` завантажує ресурси паралельно через `Promise.all` із підрахунком прогресу по кожному елементу.
+- **Спрайти, Web Audio та розв’язка через `EventTarget` (`src/audio.js`, `src/render/hud.js`, `src/sim/world.js`):** сутності малюються зі спрайт-листа `public/assets/sprites.svg` через `drawImage` (із векторним fallback). `AudioContext` розблоковується кліком «Приєднатися». `World` лише емітить `CustomEvent` (`fired`, `hit`, `exploded`, `pickup`, `score`) на `world.events` і має **нуль імпортів** аудіо чи HUD.
+- **HTTP-лобі (`src/lobby/lobby.js`, `src/lobby/lobbyView.js`):** `Lobby extends EventTarget` періодично оновлює `/api/rooms.json` із `AbortSignal.timeout(4000)` та при виході викликає `abort()` для скасування активних запитів; DOM-рендер повністю винесений у `lobbyView.js`.
+
+### Порівняння швидкості: послідовний `await` vs паралельний `Promise.all` (5 асетів)
+
+| Режим завантаження | URL-параметри | Час завантаження | Пояснення |
+|---|---|---|---|
+| **Concurrent (`Promise.all`), без затримки** | за замовчуванням (`delay=0ms`) | **`45.6 ms`** | Локальне паралельне завантаження й декодування 5 асетів. |
+| **Concurrent (`Promise.all`), `delay=250ms`** | `/?delay=250` | **`289.7 ms`** | Усі 5 запитів стартують одночасно; загальний час ≈ `250 ms` + декодування. |
+| **Sequential (`for ... await`), `delay=250ms`** | `/?delay=250&seq=1` | **`1316.0 ms`** | Кожен наступний запит чекає завершення попереднього (`~5 × 250 ms`); у **4.54×** повільніше за `Promise.all`. |
+
+### П’ять головоломок порядку виконання (Task / Microtask / `await` / `rAF`)
+
+1. **Синхронний код, мікрозадача та `await`:**
+   ~~~js
+   async function f() {
+     console.log('A')
+     await null
+     console.log('B')
+   }
+   Promise.resolve().then(() => console.log('C'))
+   f()
+   console.log('D')
+   ~~~
+   - **Вивід:** `A`, `D`, `C`, `B`.
+   - **Пояснення:** `A` і `D` виконуються синхронно; `C` потрапив у чергу мікрозадач раніше, ніж `await null` поставив туди продовження `B`.
+
+2. **`setTimeout` усередині `.then`:**
+   ~~~js
+   setTimeout(() => console.log('1'), 0)
+   Promise.resolve()
+     .then(() => {
+       console.log('2')
+       setTimeout(() => console.log('3'), 0)
+     })
+     .then(() => console.log('4'))
+   console.log('5')
+   ~~~
+   - **Вивід:** `5`, `2`, `4`, `1`, `3`.
+   - **Пояснення:** після синхронного `5` повністю спустошується мікрочерга (`2`, потім `4`), і лише після цього по черзі виконуються макрозадачі `1` і `3`.
+
+3. **Забутий `return` у ланцюжку промісів:**
+   ~~~js
+   Promise.resolve(10)
+     .then((n) => { Promise.resolve(n + 5) })
+     .then((v) => console.log('val:', v))
+   ~~~
+   - **Вивід:** `val: undefined`.
+   - **Пояснення:** перший `.then` нічого не повернув, тому наступний проміс у ланцюжку резолвиться з `undefined`.
+
+4. **`requestAnimationFrame` vs мікрозадача всередині rAF:**
+   ~~~js
+   requestAnimationFrame(() => {
+     console.log('raf-1')
+     Promise.resolve().then(() => console.log('micro-in-raf'))
+   })
+   requestAnimationFrame(() => console.log('raf-2'))
+   ~~~
+   - **Вивід:** `raf-1`, `micro-in-raf`, `raf-2`.
+   - **Пояснення:** мікрочерга очищується після завершення кожного колбеку, тому мікрозадача з першого `rAF` відпрацьовує раніше за другий `rAF`-колбек того ж кадру.
+
+5. **Подія (`EventTarget`) синхронна, а проміс — завжди асинхронний:**
+   ~~~js
+   const bus = new EventTarget()
+   bus.addEventListener('ping', () => console.log('event'))
+   Promise.resolve().then(() => console.log('promise'))
+   bus.dispatchEvent(new Event('ping'))
+   console.log('sync')
+   ~~~
+   - **Вивід:** `event`, `sync`, `promise`.
+   - **Пояснення:** `dispatchEvent` викликає слухачів синхронно на тому ж стеку, а `.then` завжди відкладається в чергу мікрозадач.
+
+### Галерея помилок M4 (Graceful Recovery)
+
+| Сценарій | Як відтворено | Фактичний вивід у консолі | Відновлення в UI |
+|---|---|---|---|
+| **Відсутній спрайт (404)** | `/?fail=404` (`/assets/does-not-exist-404.svg`) | `[Loader] failed: Error Failed to decode image: /assets/does-not-exist-404.svg` *(Vite SPA fallback повернув HTML замість SVG; для реального 404 `loadImage` кидає `HttpError 404` без ретраїв)* | Показ помилки на екрані завантаження + кнопки «Повторити» та «Грати без асетів (fallback)» із векторною графікою. |
+| **Таймаут мережі** | `/?fail=timeout` (`/api/dev-timeout`, `1200 ms`) | `[Loader] failed: TimeoutError signal timed out` *(після 3 спроб з експоненційним backoff)* | Повідомлення про таймаут + кнопки «Повторити», fallback або «Назад у лобі». |
+| **Битий JSON** | `/?fail=corrupt` (`/api/dev-corrupt.json`) | `[Loader] failed: SyntaxError Expected double-quoted property name in JSON at position 18 (line 1 column 19)` *(без ретраїв)* | Помилка перехоплена в `try/catch`, гра не зависає; доступні повтор, fallback і повернення в лобі. |
+| **Скасування (Abort)** | `/?delay=1200` + клік «Скасувати (Abort)» | `[Loader] failed: AbortError Скасовано користувачем` *(негайне скасування без ретраїв)* | Активні `fetch` перериваються через `AbortController`; користувач може повторити або повернутися в лобі. |

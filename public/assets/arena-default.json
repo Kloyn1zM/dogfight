@@ -1,0 +1,6 @@
+{
+  "targetAsteroids": 6,
+  "homingEvery": 4,
+  "background": "#0e1016",
+  "gridColor": "#1a2030"
+}

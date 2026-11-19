@@ -144,6 +144,8 @@ export class Ship extends Entity {
       behaviors,
     })
 
-    return world.spawn(bullet)
+    const spawned = world.spawn(bullet)
+    world.emit('fired', { homing, ownerId: this.id })
+    return spawned
   }
 }
