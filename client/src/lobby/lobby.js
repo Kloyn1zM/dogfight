@@ -1,11 +1,7 @@
-import { fetchJson, isAbortError } from '../assets/loader.js'
+import { fetchJson, HttpError, isAbortError } from '../assets/loader.js'
 
 /**
- * Модель лобі поверх EventTarget.
- * - Періодично опитує HTTP /api/rooms.json з таймаутом AbortSignal.timeout.
- * - При виході з лобі (stopPolling / join) скасовує активний запит через AbortController,
- *   щоб відповідь «з того світу» не оновила закритий екран.
- * - Не має жодної прив'язки до DOM — рендер живе окремо в lobbyView.js.
+ * Модель лобі поверх EventTarget, підключена до реального Node HTTP API (/api/rooms).
  */
 export class Lobby extends EventTarget {
   #endpoint
@@ -14,7 +10,7 @@ export class Lobby extends EventTarget {
   #inFlight = null
   #visible = false
 
-  constructor({ endpoint = '/api/rooms.json' } = {}) {
+  constructor({ endpoint = '/api/rooms' } = {}) {
     super()
     this.#endpoint = endpoint
   }
@@ -79,6 +75,33 @@ export class Lobby extends EventTarget {
         new CustomEvent('loading', { detail: { loading: false } }),
       )
     }
+  }
+
+  async createRoom(name, difficulty = 'Normal') {
+    const cleanName = String(name || '').trim()
+    if (!cleanName) return null
+
+    const res = await fetch(this.#endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: cleanName, difficulty }),
+      signal: AbortSignal.timeout(4000),
+    })
+
+    if (!res.ok) {
+      let msg = res.statusText
+      try {
+        const body = await res.json()
+        if (body?.error) msg = body.error
+      } catch {
+        // ігноруємо не-JSON тіло помилки
+      }
+      throw new HttpError(this.#endpoint, res.status, msg)
+    }
+
+    const created = await res.json()
+    await this.refresh()
+    return created
   }
 
   join(roomId, playerName) {

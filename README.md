@@ -190,3 +190,60 @@ canvasEl.addEventListener('pointerdown', player.fire)
 | **Таймаут мережі** | `/?fail=timeout` (`/api/dev-timeout`, `1200 ms`) | `[Loader] failed: TimeoutError signal timed out` *(після 3 спроб з експоненційним backoff)* | Повідомлення про таймаут + кнопки «Повторити», fallback або «Назад у лобі». |
 | **Битий JSON** | `/?fail=corrupt` (`/api/dev-corrupt.json`) | `[Loader] failed: SyntaxError Expected double-quoted property name in JSON at position 18 (line 1 column 19)` *(без ретраїв)* | Помилка перехоплена в `try/catch`, гра не зависає; доступні повтор, fallback і повернення в лобі. |
 | **Скасування (Abort)** | `/?delay=1200` + клік «Скасувати (Abort)» | `[Loader] failed: AbortError Скасовано користувачем` *(негайне скасування без ретраїв)* | Активні `fetch` перериваються через `AbortController`; користувач може повторити або повернутися в лобі. |
+
+---
+
+## Lab 04 — Node.js: `EventEmitter`, Streams, and a WebSocket Server
+
+### Що реалізовано
+- **Workspaces (`package.json`, `client/`, `server/`):** монорепозиторій на базі npm workspaces із `"type": "module"`, префіксами `node:` для вбудованих модулів і конфігурацією з `.env` (`node --env-file=../.env`, валідація в `server/src/config.js`).
+- **HTTP-сервер (`server/src/index.js`):** чистий `node:http` без фреймворків — роздає зібраний `client/dist/` із MIME-типами та захистом від path traversal (`..`), надає JSON API (`GET/POST /api/rooms`, `GET /api/replays`, `GET /api/replays/:id`, `GET /health`), Vite проксує `/api`, `/ws`, `/health` у dev-режимі; реалізовано graceful shutdown на `SIGINT`/`SIGTERM` (закриття сокетів із кодом `1001`, зупинка HTTP-сервера, дозапис логів, `exit 0`).
+- **Кімнати та WebSocket (`server/src/rooms.js`, `server/src/ws.js`, `server/src/protocol.js`):** `Room extends EventEmitter`, `RoomManager` з автовидаленням порожніх непостійних кімнат, версіонований JSON-протокол `v1` із суворою валідацією кожного повідомлення, таймаут на `join` (5 с), heartbeat `ping`/`pong` кожні 15 с (розрив після 2 пропусків), обов’язкові `'error'`-слухачі на всіх сокетах та емітерах.
+- **Захист від зловживань (`server/src/ws.js`):** `maxPayload` (4 KB), per-socket token-bucket rate limiter (`20 msg/s`), ліміти на кількість кімнат (`20`) і гравців у кімнаті (`8`), slow-client policy за `socket.bufferedAmount` (відкидання некритичних повідомлень вище 64 KB та закриття сокета при переповненні > 256 KB).
+- **Клієнт (`client/src/net/connection.js`, `client/src/ui/roomPanel.js`):** `GameConnection` із диспетчеризацією по `type`, чергою відправки під час підключення та автоперепідключенням з експоненційним backoff + jitter; живий список гравців (`roster`) та чат у двох вікнах браузера.
+- **Стрімові логи матчів (`server/src/log/matchlog.js`, `server/src/log/replay.js`):** object-mode `JsonLinesTransform` + `pipeline()` у `server/logs/<room>-<timestamp>.ndjson`; читання через async-генератор `readReplayEvents` і стрімова віддача `GET /api/replays/:id` через `pipeline(createReadStream, res)`.
+
+---
+
+### Експеримент M3 — Backpressure під час стрімінгу `200 MB` реплею
+
+Згенеровано синтетичний лог `200.0 MB` і завантажено через `GET /api/replays/bench-200mb` штучно уповільненим клієнтом (`~25 MB/s`, загальний час `8.0 s`) із заміром пам’яті сервера через `/health` щосекунди:
+
+| Час (с) | Server RSS (MB) | Heap Used (MB) | Графік RSS (масштаб: 1 блок ≈ 5 MB) |
+|---:|---:|---:|---|
+| 0 | 46.50 | 8.83 | `█████████` |
+| 1 | 52.86 | 8.68 | `███████████` |
+| 2 | 63.59 | 9.01 | `█████████████` |
+| 3 | 52.42 | 7.47 | `██████████` |
+| 4 | 57.87 | 7.70 | `████████████` |
+| 5 | 65.88 | 8.02 | `█████████████` |
+| 6 | 52.27 | 7.49 | `██████████` |
+| 7 | 58.63 | 7.77 | `████████████` |
+| 8 | 58.50 | 7.86 | `████████████` |
+
+**Висновок (Backpressure):**
+Незважаючи на те, що файл важить `200 MB`, а клієнт читає повільно, RSS сервера залишився **пласким у діапазоні `46.5–65.9 MB`** (heap `7.5–9.0 MB`). Коли внутрішній буфер сокета `res` перевищує `highWaterMark`, `res.write()` повертає `false`; `stream.pipeline()` автоматично ставить `createReadStream` на паузу і відновлює читання з диска лише після події `'drain'`. Без backpressure буфер у пам’яті ріс би до сотень мегабайтів аж до OOM.
+
+---
+
+### Нотатка M4 — Node Event Loop, блокування потоку та неперехоплені помилки
+
+#### 1. Фази Node.js Event Loop і демонстрація блокування на 300 мс
+Node.js виконує JavaScript-код в **одному потоці** поверх циклу **libuv**:
+`timers (setTimeout)` → `pending callbacks` → `poll (I/O: мережа, файли)` → `check (setImmediate)` → `close callbacks`, причому після кожної фази повністю спорожнюються `process.nextTick` та черга мікрозадач Promise. Файловий I/O і DNS працюють у пулі потоків libuv, але обробники запитів і WebSocket-повідомлень виконуються на одному головному потоці.
+
+**Демонстрація (`GET /api/slow?ms=300` паралельно з активним WebSocket-клієнтом):**
+
+~~~text
+{
+  normalWsPingMs: 2.61,
+  during300msBlockPingMs: 327.79,
+  afterBlockPingMs: 0.61,
+  serverBlockedMs: 300.4
+}
+~~~
+
+Поки один HTTP-запит тримав головний потік у синхронному `while` протягом `300.4 ms`, цикл libuv не міг повернутися у фазу `poll`, тому затримка **зовсім іншого** підключеного WebSocket-клієнта зросла з `2.61 ms` до `327.79 ms`. Це означає, що жодна важка синхронна операція не може виконуватись у запитах ігрового сервера.
+
+#### 2. Чому неперехоплений `'error'` (і unhandled rejection) валить увесь сервер
+У Node.js `EventEmitter` має спеціальне правило: якщо викликати `emit('error', err)` без жодного підписаного слухача `'error'`, рушій кидає виняток на верхній рівень і **аварійно завершує весь процес** (так само як `unhandledRejection` у

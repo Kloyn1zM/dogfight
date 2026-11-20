@@ -1,6 +1,6 @@
 import './style.css'
 import { createLoop } from './loop.js'
-import { createInput, readShipCommand } from './input.js'
+import { createInput, isEditableTarget, readShipCommand } from './input.js'
 import { createArena } from './sim/arena.js'
 import { World } from './sim/world.js'
 import { createCanvas } from './render/canvas.js'
@@ -17,10 +17,13 @@ import { createAudioManager } from './audio.js'
 import { loadAll, loadJson } from './assets/loader.js'
 import { Lobby } from './lobby/lobby.js'
 import { mountLobbyView } from './lobby/lobbyView.js'
+import { GameConnection } from './net/connection.js'
+import { mountRoomPanel } from './ui/roomPanel.js'
 
 const canvasEl = document.querySelector('#game')
 const lobbyOverlay = document.querySelector('#lobby-overlay')
 const loadingControls = document.querySelector('#loading-controls')
+const roomPanelEl = document.querySelector('#room-panel')
 
 const params = new URLSearchParams(window.location.search)
 const devDelayMs = Number(params.get('delay') || 0)
@@ -33,6 +36,9 @@ const world = new World(arena)
 const hud = createHud(world)
 const audio = createAudioManager()
 audio.attachWorld(world)
+
+const connection = new GameConnection()
+const roomPanel = mountRoomPanel(roomPanelEl, connection)
 
 const command = { turn: 0, thrust: false, fire: false, fireHoming: false }
 
@@ -108,6 +114,10 @@ function startPlaying(assets) {
   setLoadingControls('')
   mode = 'playing'
   world.reset(activeRoom?.arena || assets.arena)
+  roomPanel.show(activeRoom?.name)
+  if (activeRoom) {
+    connection.connect({ room: activeRoom.id, name: activePlayerName })
+  }
   loop.start()
 }
 
@@ -137,7 +147,6 @@ async function beginLoadingAndPlay({ ignoreDevFail = false } = {}) {
       timeoutMs: 4000,
     })
 
-    // Сценарії галереї помилок M4 (через ?fail=404 | timeout | corrupt)
     const testManifest = structuredClone(manifest)
     let timeoutMs = 5000
     if (!ignoreDevFail && devFailMode === '404') {
@@ -161,9 +170,6 @@ async function beginLoadingAndPlay({ ignoreDevFail = false } = {}) {
       },
     })
 
-    console.log(
-      `[Loader] mode=${devSequential ? 'sequential' : 'Promise.all'} delay=${devDelayMs}ms total=${assets.durationMs.toFixed(1)} ms`,
-    )
     startPlaying(assets)
   } catch (err) {
     console.warn('[Loader] failed:', err.name, err.message)
@@ -190,12 +196,15 @@ async function beginLoadingAndPlay({ ignoreDevFail = false } = {}) {
   }
 }
 
-const lobby = new Lobby({ endpoint: '/api/rooms.json' })
+const lobby = new Lobby({ endpoint: '/api/rooms' })
 const lobbyView = mountLobbyView(lobbyOverlay, lobby)
 
 function returnToLobby() {
   loadController?.abort()
+  connection.disconnect()
+  roomPanel.hide()
   loop.stop()
+  input.clear()
   setLoadingControls('')
   mode = 'lobby'
   drawBackground(ctx, size.w, size.h)
@@ -208,12 +217,10 @@ function returnToLobby() {
 lobby.addEventListener('joined', async (e) => {
   activeRoom = e.detail.room
   activePlayerName = e.detail.playerName
-  // Клік «Приєднатися» — це user gesture, який розблоковує Web Audio API
   await audio.unlock()
   await beginLoadingAndPlay()
 })
 
-// Стартуємо з екрану лобі
 returnToLobby()
 
 canvasEl.addEventListener('pointerdown', (e) => {
@@ -223,6 +230,7 @@ canvasEl.addEventListener('pointerdown', (e) => {
 })
 
 window.addEventListener('keydown', (e) => {
+  if (isEditableTarget(e.target)) return
   if (mode !== 'playing' || e.repeat) return
 
   if (e.code === 'KeyP') {

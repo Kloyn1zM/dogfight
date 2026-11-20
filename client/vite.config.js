@@ -8,7 +8,6 @@ function devLabMiddleware() {
         if (!req.url) return next()
         const url = new URL(req.url, 'http://localhost')
 
-        // Ендпоінт для тесту таймауту (відповідає пізніше, ніж AbortSignal.timeout)
         if (url.pathname === '/api/dev-timeout') {
           setTimeout(() => {
             if (!res.writableEnded) {
@@ -20,7 +19,6 @@ function devLabMiddleware() {
           return
         }
 
-        // Ендпоінт для тесту битого JSON (200 OK, але невалідний синтаксис)
         if (url.pathname === '/api/dev-corrupt.json') {
           res.statusCode = 200
           res.setHeader('Content-Type', 'application/json')
@@ -28,7 +26,6 @@ function devLabMiddleware() {
           return
         }
 
-        // Штучна затримка ?delay=350 для перевірки прогрес-бару та Promise.all vs seq
         const delayMs = Number(url.searchParams.get('delay') || 0)
         if (delayMs > 0) {
           setTimeout(() => next(), Math.min(delayMs, 3000))
@@ -43,4 +40,20 @@ function devLabMiddleware() {
 
 export default defineConfig({
   plugins: [devLabMiddleware()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:3000',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://127.0.0.1:3000',
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: 'ws://127.0.0.1:3000',
+        ws: true,
+      },
+    },
+  },
 })

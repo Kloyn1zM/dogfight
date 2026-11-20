@@ -1,6 +1,6 @@
 /**
- * Відображення лобі в DOM. Повністю відділене від мережевої логіки Lobby:
- * підписується на події EventTarget і викликає lobby.refresh() / lobby.join().
+ * Відображення лобі в DOM: вибір кімнати, створення нової кімнати (POST /api/rooms),
+ * введення позивного та вхід у матч.
  */
 export function mountLobbyView(container, lobby) {
   let selectedRoomId = ''
@@ -9,7 +9,7 @@ export function mountLobbyView(container, lobby) {
     <div class="lobby-card">
       <div class="lobby-header">
         <h1>DOGFIGHT</h1>
-        <span class="badge">Lab 03 · HTTP Lobby</span>
+        <span class="badge">Lab 04 · Node + WS</span>
       </div>
       <label class="field">
         <span>Позивний пілота</span>
@@ -21,6 +21,15 @@ export function mountLobbyView(container, lobby) {
       </div>
       <div id="lobby-status" class="status">Завантаження списку кімнат...</div>
       <ul id="room-list" class="room-list"></ul>
+      <form id="create-room-form" class="create-room-row">
+        <input id="new-room-name" type="text" maxlength="28" placeholder="Нова кімната..." />
+        <select id="new-room-diff">
+          <option value="Normal">Normal</option>
+          <option value="Hard">Hard</option>
+          <option value="Chill">Chill</option>
+        </select>
+        <button type="submit">+ Створити</button>
+      </form>
       <button id="btn-join" class="btn-primary" type="button" disabled>Приєднатися та грати</button>
     </div>
   `
@@ -30,6 +39,9 @@ export function mountLobbyView(container, lobby) {
   const joinBtn = container.querySelector('#btn-join')
   const statusEl = container.querySelector('#lobby-status')
   const listEl = container.querySelector('#room-list')
+  const createForm = container.querySelector('#create-room-form')
+  const newRoomInput = container.querySelector('#new-room-name')
+  const newRoomDiff = container.querySelector('#new-room-diff')
 
   function renderRooms(rooms) {
     listEl.innerHTML = ''
@@ -49,13 +61,19 @@ export function mountLobbyView(container, lobby) {
     for (const room of rooms) {
       const li = document.createElement('li')
       li.className = `room-item${room.id === selectedRoomId ? ' selected' : ''}`
-      li.innerHTML = `
-        <div>
-          <strong>${room.name}</strong>
-          <small>${room.difficulty} · астероїдів: ${room.arena.targetAsteroids}</small>
-        </div>
-        <span class="pill">${room.players}/${room.maxPlayers}</span>
-      `
+
+      const left = document.createElement('div')
+      const title = document.createElement('strong')
+      title.textContent = room.name
+      const meta = document.createElement('small')
+      meta.textContent = `${room.difficulty} · астероїдів: ${room.arena.targetAsteroids}`
+      left.append(title, meta)
+
+      const pill = document.createElement('span')
+      pill.className = 'pill'
+      pill.textContent = `${room.players}/${room.maxPlayers}`
+
+      li.append(left, pill)
       li.addEventListener('click', () => {
         selectedRoomId = room.id
         renderRooms(rooms)
@@ -67,6 +85,22 @@ export function mountLobbyView(container, lobby) {
   refreshBtn.addEventListener('click', () => lobby.refresh())
   joinBtn.addEventListener('click', () => {
     lobby.join(selectedRoomId, nameInput.value)
+  })
+
+  createForm.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const name = newRoomInput.value.trim()
+    if (!name) return
+    try {
+      const created = await lobby.createRoom(name, newRoomDiff.value)
+      if (created) {
+        selectedRoomId = created.id
+        newRoomInput.value = ''
+        renderRooms(lobby.rooms)
+      }
+    } catch (err) {
+      statusEl.textContent = `Не вдалося створити кімнату: ${err.message}`
+    }
   })
 
   const onRooms = (e) => renderRooms(e.detail.rooms)

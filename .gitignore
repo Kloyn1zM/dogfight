@@ -1,11 +1,17 @@
 # Logs
 logs
+server/logs
 *.log
+*.ndjson
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+
+# Env secrets/local config
+.env
+.env.local
 
 node_modules
 dist

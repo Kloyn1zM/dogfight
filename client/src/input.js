@@ -13,11 +13,23 @@ const GAME_KEYS = new Set([
   'Space',
 ])
 
+export function isEditableTarget(el) {
+  if (!el || typeof el !== 'object') return false
+  const tag = el.tagName
+  return (
+    tag === 'INPUT' ||
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    Boolean(el.isContentEditable)
+  )
+}
+
 export function createInput(target) {
   const down = new Set()
   const pressed = new Set()
 
   function onKeyDown(e) {
+    if (isEditableTarget(e.target)) return
     if (e.ctrlKey || e.metaKey || e.altKey) return
     if (GAME_KEYS.has(e.code)) e.preventDefault()
     if (e.repeat) return
@@ -26,6 +38,11 @@ export function createInput(target) {
   }
 
   function onKeyUp(e) {
+    if (isEditableTarget(e.target)) {
+      down.delete(e.code)
+      pressed.delete(e.code)
+      return
+    }
     if (GAME_KEYS.has(e.code)) e.preventDefault()
     down.delete(e.code)
     pressed.delete(e.code)
@@ -46,6 +63,10 @@ export function createInput(target) {
     consume() {
       pressed.clear()
     },
+    clear() {
+      down.clear()
+      pressed.clear()
+    },
     destroy() {
       target.removeEventListener('keydown', onKeyDown)
       target.removeEventListener('keyup', onKeyUp)
@@ -56,9 +77,6 @@ export function createInput(target) {
   }
 }
 
-/**
- * Перетворює стан клавіатури браузера в чисту команду симуляції.
- */
 export function readShipCommand(
   input,
   out = { turn: 0, thrust: false, fire: false, fireHoming: false },
