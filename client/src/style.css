@@ -331,3 +331,100 @@ body {
   font-size: 12px;
   cursor: pointer;
 }
+
+.net-panel {
+  position: fixed;
+  right: 16px;
+  top: 14px;
+  width: 300px;
+  background: rgba(15, 20, 32, 0.86);
+  border: 1px solid #263148;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 16;
+  backdrop-filter: blur(4px);
+  font-size: 11px;
+}
+
+.np-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.np-header select {
+  background: #0e1016;
+  border: 1px solid #334155;
+  color: #38bdf8;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font: inherit;
+}
+
+#np-graph {
+  width: 100%;
+  height: 58px;
+  border: 1px solid #1e293b;
+  border-radius: 5px;
+  display: block;
+}
+
+.np-stats {
+  white-space: pre-line;
+  color: #cbd5e1;
+  line-height: 1.4;
+}
+
+.np-toggles {
+  display: flex;
+  justify-content: space-between;
+  color: #e2e8f0;
+}
+
+.np-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.np-sliders {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  color: #94a3b8;
+}
+
+.np-sliders label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.np-sliders input[type='range'] {
+  width: 100%;
+  margin: 0;
+}
+
+.np-presets {
+  display: flex;
+  gap: 6px;
+}
+
+.np-presets button {
+  flex: 1;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  border-radius: 5px;
+  padding: 4px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.np-presets button:hover {
+  border-color: #38bdf8;
+}

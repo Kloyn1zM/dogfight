@@ -1,16 +1,22 @@
 import './style.css'
+import {
+  TICK_DT,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+  createShipState,
+  hashShipState,
+  integrateShip,
+} from '@dogfight/shared'
 import { createLoop } from './loop.js'
 import { createInput, isEditableTarget, readShipCommand } from './input.js'
-import { createArena } from './sim/arena.js'
-import { World } from './sim/world.js'
 import { createCanvas } from './render/canvas.js'
 import {
   createStarfield,
   drawBackground,
   drawGrid,
   drawLoadingScreen,
+  drawMultiplayerArena,
   drawStarfield,
-  drawWorld,
 } from './render/draw.js'
 import { createHud } from './render/hud.js'
 import { createAudioManager } from './audio.js'
@@ -18,12 +24,27 @@ import { loadAll, loadJson } from './assets/loader.js'
 import { Lobby } from './lobby/lobby.js'
 import { mountLobbyView } from './lobby/lobbyView.js'
 import { GameConnection } from './net/connection.js'
+import { NetWorld } from './net/netWorld.js'
 import { mountRoomPanel } from './ui/roomPanel.js'
+import { mountNetPanel } from './ui/netPanel.js'
+
+// Перевірка детермінізму shared/ у браузері (має збігатися з Node.js до біта)
+function logBrowserDeterminismHash() {
+  const ship = createShipState({ id: 1, x: 640, y: 360, angle: -Math.PI / 2 })
+  for (let i = 0; i < 1000; i += 1) {
+    const turn = i % 30 < 10 ? 1 : i % 30 < 20 ? -1 : 0
+    const thrust = i % 3 !== 0
+    integrateShip(ship, { turn, thrust }, TICK_DT)
+  }
+  console.log('[Determinism] Browser 1000-step hash:', hashShipState(ship))
+}
+logBrowserDeterminismHash()
 
 const canvasEl = document.querySelector('#game')
 const lobbyOverlay = document.querySelector('#lobby-overlay')
 const loadingControls = document.querySelector('#loading-controls')
 const roomPanelEl = document.querySelector('#room-panel')
+const netPanelEl = document.querySelector('#net-panel')
 
 const params = new URLSearchParams(window.location.search)
 const devDelayMs = Number(params.get('delay') || 0)
@@ -31,31 +52,30 @@ const devSequential = params.get('seq') === '1'
 const devFailMode = params.get('fail') || ''
 
 const input = createInput(window)
-const arena = createArena()
-const world = new World(arena)
-const hud = createHud(world)
+const netWorld = new NetWorld()
+const hud = createHud(netWorld)
 const audio = createAudioManager()
-audio.attachWorld(world)
+audio.attachWorld(netWorld)
 
 const connection = new GameConnection()
 const roomPanel = mountRoomPanel(roomPanelEl, connection)
+const netPanel = mountNetPanel(netPanelEl, { connection, netWorld })
 
 const command = { turn: 0, thrust: false, fire: false, fireHoming: false }
+const arenaStars = createStarfield(WORLD_WIDTH, WORLD_HEIGHT, 160)
 
-let stars = []
-let lastAlpha = 0
+let bgStars = []
 let mode = 'lobby' // 'lobby' | 'loading' | 'playing'
 let activeRoom = null
 let activePlayerName = 'Pilot'
 let loadedAssets = { sprites: {}, sounds: {}, arena: null }
 let loadController = null
 let loadingState = { ratio: 0, label: '', error: null }
+let pointerFirePending = false
 
 const { ctx, size } = createCanvas(canvasEl, {
   onResize({ w, h }) {
-    arena.width = w
-    arena.height = h
-    stars = createStarfield(w, h)
+    bgStars = createStarfield(w, h)
   },
 })
 
@@ -65,38 +85,71 @@ window.addEventListener('resize', () => {
   } else if (mode === 'lobby') {
     drawBackground(ctx, size.w, size.h)
     drawGrid(ctx, size.w, size.h)
-    drawStarfield(ctx, stars)
+    drawStarfield(ctx, bgStars)
   }
 })
 
+// Підписки мережевого шару на події від сервера
+connection.addEventListener('welcome', (e) => {
+  netWorld.setWelcome({
+    shipId: e.detail.shipId,
+    tick: e.detail.tick,
+  })
+})
+
+connection.addEventListener('roster', (e) => {
+  netWorld.setRoster(e.detail.players)
+})
+
+connection.addEventListener('snapshot', (e) => {
+  netWorld.onSnapshot(e.detail.snapshot, e.detail.receivedAt)
+})
+
+connection.addEventListener('events', (e) => {
+  netWorld.onServerEvents(e.detail.events)
+})
+
 function simulate(dt) {
-  if (input.justPressed('KeyR')) {
-    world.reset(activeRoom?.arena)
+  readShipCommand(input, command)
+  if (pointerFirePending) {
+    command.fire = true
+    pointerFirePending = false
   }
 
-  readShipCommand(input, command)
-  world.step(dt, command)
+  const sentInput = netWorld.stepLocal(command, dt)
+  if (sentInput) {
+    connection.sendInput(sentInput)
+  }
+
   input.consume()
 }
 
-function render(alpha, stats, paused = false) {
-  lastAlpha = alpha
+function render(alpha, stats) {
+  const now = performance.now()
   const theme = activeRoom?.arena || loadedAssets.arena || {}
-  drawBackground(ctx, size.w, size.h, theme.background)
-  drawGrid(ctx, size.w, size.h, theme.gridColor)
-  drawStarfield(ctx, stars)
-  drawWorld(ctx, world, alpha, loadedAssets.sprites.sheet || null)
+  const renderState = netWorld.getRenderState(now, alpha)
+
+  drawMultiplayerArena(ctx, size.w, size.h, {
+    theme,
+    stars: arenaStars,
+    renderState,
+    spriteSheet: loadedAssets.sprites.sheet || null,
+  })
+
   hud.draw(ctx, stats, {
-    paused,
     playerName: activePlayerName,
     roomName: activeRoom?.name || 'Arena',
     muted: audio.isMuted(),
   })
+
+  netPanel.update(now)
 }
 
+// 30 Hz клієнтська симуляція 1-в-1 з авторитетним сервером + 60/120/144 Hz інтерпольований рендер
 const loop = createLoop({
+  step: TICK_DT,
   simulate,
-  render: (alpha, stats) => render(alpha, stats, false),
+  render,
 })
 
 function setLoadingControls(html, handlers = {}) {
@@ -113,10 +166,15 @@ function startPlaying(assets) {
   audio.setBuffers(assets.sounds)
   setLoadingControls('')
   mode = 'playing'
-  world.reset(activeRoom?.arena || assets.arena)
+  netWorld.reset()
   roomPanel.show(activeRoom?.name)
+  netPanel.show()
   if (activeRoom) {
-    connection.connect({ room: activeRoom.id, name: activePlayerName })
+    connection.connect({
+      room: activeRoom.id,
+      name: activePlayerName,
+      codec: connection.codecName,
+    })
   }
   loop.start()
 }
@@ -202,14 +260,16 @@ const lobbyView = mountLobbyView(lobbyOverlay, lobby)
 function returnToLobby() {
   loadController?.abort()
   connection.disconnect()
+  netWorld.reset()
   roomPanel.hide()
+  netPanel.hide()
   loop.stop()
   input.clear()
   setLoadingControls('')
   mode = 'lobby'
   drawBackground(ctx, size.w, size.h)
   drawGrid(ctx, size.w, size.h)
-  drawStarfield(ctx, stars)
+  drawStarfield(ctx, bgStars)
   lobbyView.show()
   lobby.startPolling(5000)
 }
@@ -225,23 +285,14 @@ returnToLobby()
 
 canvasEl.addEventListener('pointerdown', (e) => {
   if (mode !== 'playing' || e.button !== 0 || !loop.isRunning()) return
-  const player = world.getPlayer()
-  if (player) player.fire(world)
+  pointerFirePending = true
 })
 
 window.addEventListener('keydown', (e) => {
   if (isEditableTarget(e.target)) return
   if (mode !== 'playing' || e.repeat) return
 
-  if (e.code === 'KeyP') {
-    e.preventDefault()
-    if (loop.isRunning()) {
-      loop.stop()
-      render(lastAlpha, loop.getStats(), true)
-    } else {
-      loop.start()
-    }
-  } else if (e.code === 'KeyM') {
+  if (e.code === 'KeyM') {
     audio.toggleMute()
   } else if (e.code === 'Escape') {
     returnToLobby()

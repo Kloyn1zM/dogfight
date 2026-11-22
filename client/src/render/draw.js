@@ -1,16 +1,6 @@
+import { WORLD_HEIGHT, WORLD_WIDTH } from '@dogfight/shared'
+
 const SPRITE_CELL = 64
-
-export function lerp(a, b, t) {
-  return a + (b - a) * t
-}
-
-export function lerpAngle(from, to, t) {
-  const tau = Math.PI * 2
-  let delta = ((to - from) % tau) + tau
-  delta %= tau
-  if (delta > Math.PI) delta -= tau
-  return from + delta * t
-}
 
 export function createStarfield(width, height, count = 140) {
   const stars = []
@@ -95,32 +85,61 @@ export function drawLoadingScreen(
   ctx.restore()
 }
 
-export function drawWorld(ctx, world, alpha, spriteSheet = null) {
-  for (const entity of world) {
-    if (!entity.alive) continue
+/**
+ * Вписує спільну логічну арену 1280×720 у будь-який розмір вікна зі збереженням пропорцій.
+ */
+export function drawMultiplayerArena(
+  ctx,
+  canvasW,
+  canvasH,
+  { theme = {}, stars = [], renderState, spriteSheet = null },
+) {
+  drawBackground(ctx, canvasW, canvasH, '#07090e')
 
-    const x = lerp(entity.prevPos.x, entity.pos.x, alpha)
-    const y = lerp(entity.prevPos.y, entity.pos.y, alpha)
-    const angle = lerpAngle(entity.prevAngle, entity.angle, alpha)
+  const scale = Math.min(canvasW / WORLD_WIDTH, canvasH / WORLD_HEIGHT)
+  const drawW = WORLD_WIDTH * scale
+  const drawH = WORLD_HEIGHT * scale
+  const offsetX = (canvasW - drawW) / 2
+  const offsetY = (canvasH - drawH) / 2
 
+  ctx.save()
+  ctx.translate(offsetX, offsetY)
+  ctx.scale(scale, scale)
+
+  ctx.beginPath()
+  ctx.rect(0, 0, WORLD_WIDTH, WORLD_HEIGHT)
+  ctx.clip()
+
+  drawBackground(ctx, WORLD_WIDTH, WORLD_HEIGHT, theme.background || '#0e1016')
+  drawGrid(ctx, WORLD_WIDTH, WORLD_HEIGHT, theme.gridColor || '#1a2030')
+  drawStarfield(ctx, stars)
+
+  for (const entity of renderState.entities) {
     switch (entity.kind) {
       case 'ship':
-        drawShip(ctx, x, y, angle, entity, spriteSheet)
+        drawShip(ctx, entity, spriteSheet)
         break
       case 'bullet':
-        drawBullet(ctx, x, y, angle, entity)
+        drawBullet(ctx, entity)
         break
       case 'asteroid':
-        drawAsteroid(ctx, x, y, entity, spriteSheet)
+        drawAsteroid(ctx, entity, spriteSheet)
         break
       case 'pickup':
-        drawPickup(ctx, x, y, angle, entity, spriteSheet)
-        break
-      case 'explosion':
-        drawExplosion(ctx, entity)
+        drawPickup(ctx, entity, spriteSheet)
         break
     }
   }
+
+  for (const explosion of renderState.explosions) {
+    drawExplosion(ctx, explosion)
+  }
+
+  // Чітка рамка меж спільної арени
+  ctx.strokeStyle = '#334155'
+  ctx.lineWidth = 2
+  ctx.strokeRect(1, 1, WORLD_WIDTH - 2, WORLD_HEIGHT - 2)
+  ctx.restore()
 }
 
 function drawSpriteCell(ctx, sheet, cellIndex, drawSize) {
@@ -137,12 +156,25 @@ function drawSpriteCell(ctx, sheet, cellIndex, drawSize) {
   )
 }
 
-function drawShip(ctx, x, y, angle, ship, sheet) {
+function drawShip(ctx, ship, sheet) {
   ctx.save()
-  ctx.translate(x, y)
-  ctx.rotate(angle)
+  ctx.translate(ship.x, ship.y)
 
-  if (ship.thrust > 0) {
+  // Ім'я пілота та смужка HP (горизонтально, без повороту корабля)
+  ctx.font = 'bold 12px ui-monospace, SFMono-Regular, Menlo, monospace'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = ship.isLocal ? '#38bdf8' : '#4ade80'
+  ctx.fillText(ship.name || `P${ship.id}`, 0, -28)
+
+  const hpRatio = Math.max(0, Math.min(1, (ship.hp || 0) / 100))
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+  ctx.fillRect(-18, -22, 36, 4)
+  ctx.fillStyle = hpRatio > 0.35 ? '#4ade80' : '#f87171'
+  ctx.fillRect(-18, -22, 36 * hpRatio, 4)
+
+  ctx.rotate(ship.angle)
+
+  if (ship.thrusting) {
     ctx.fillStyle = ship.rapidFireActive ? '#38bdf8' : '#fb923c'
     ctx.beginPath()
     ctx.moveTo(-12, 0)
@@ -156,7 +188,7 @@ function drawShip(ctx, x, y, angle, ship, sheet) {
   if (sheet) {
     drawSpriteCell(ctx, sheet, 0, ship.radius * 3.1)
   } else {
-    ctx.fillStyle = '#e5e7eb'
+    ctx.fillStyle = ship.isLocal ? '#e5e7eb' : '#86efac'
     ctx.beginPath()
     ctx.moveTo(16, 0)
     ctx.lineTo(-12, -10)
@@ -166,22 +198,32 @@ function drawShip(ctx, x, y, angle, ship, sheet) {
     ctx.fill()
   }
 
+  // Кольорове кільце для швидкого розрізнення ворожого корабля
+  if (!ship.isLocal) {
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.65)'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.arc(0, 0, ship.radius + 5, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+
   if (ship.shieldActive) {
     ctx.strokeStyle = '#38bdf8'
     ctx.lineWidth = 2
     ctx.beginPath()
-    ctx.arc(0, 0, ship.radius + 8, 0, Math.PI * 2)
+    ctx.arc(0, 0, ship.radius + 9, 0, Math.PI * 2)
     ctx.stroke()
   }
 
   ctx.restore()
 }
 
-function drawBullet(ctx, x, y, angle, bullet) {
+function drawBullet(ctx, bullet) {
   ctx.save()
-  ctx.translate(x, y)
-  ctx.rotate(angle)
+  ctx.translate(bullet.x, bullet.y)
+  ctx.rotate(bullet.angle)
   ctx.fillStyle = bullet.isHoming ? '#c084fc' : '#facc15'
+  if (bullet.predicted) ctx.globalAlpha = 0.85
   ctx.beginPath()
   if (bullet.isHoming) {
     ctx.moveTo(8, 0)
@@ -189,16 +231,16 @@ function drawBullet(ctx, x, y, angle, bullet) {
     ctx.lineTo(-5, 4)
     ctx.closePath()
   } else {
-    ctx.arc(0, 0, bullet.radius, 0, Math.PI * 2)
+    ctx.arc(0, 0, 4, 0, Math.PI * 2)
   }
   ctx.fill()
   ctx.restore()
 }
 
-function drawAsteroid(ctx, x, y, asteroid, sheet) {
+function drawAsteroid(ctx, asteroid, sheet) {
   ctx.save()
-  ctx.translate(x, y)
-  ctx.rotate(asteroid.visualAngle)
+  ctx.translate(asteroid.x, asteroid.y)
+  ctx.rotate(asteroid.angle)
 
   if (sheet) {
     drawSpriteCell(ctx, sheet, asteroid.isHoming ? 2 : 1, asteroid.radius * 2.5)
@@ -222,11 +264,11 @@ function drawAsteroid(ctx, x, y, asteroid, sheet) {
   ctx.restore()
 }
 
-function drawPickup(ctx, x, y, angle, pickup, sheet) {
+function drawPickup(ctx, pickup, sheet) {
   const isShield = pickup.effect === 'shield'
   ctx.save()
-  ctx.translate(x, y)
-  ctx.rotate(angle)
+  ctx.translate(pickup.x, pickup.y)
+  ctx.rotate(pickup.angle)
 
   if (sheet) {
     drawSpriteCell(ctx, sheet, 3, pickup.radius * 2.6)

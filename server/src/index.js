@@ -136,6 +136,24 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
+    if (req.method === 'GET' && pathname === '/api/stats') {
+      const mem = process.memoryUsage()
+      const matches = roomManager
+        .allRooms()
+        .filter((r) => r.match)
+        .map((r) => r.match.getStats())
+      sendJson(res, 200, {
+        uptimeSec: Number(process.uptime().toFixed(1)),
+        rssMb: Number((mem.rss / (1024 * 1024)).toFixed(2)),
+        heapUsedMb: Number((mem.heapUsed / (1024 * 1024)).toFixed(2)),
+        rooms: roomManager.size,
+        players: roomManager.totalPlayers(),
+        ws: wsControl ? wsControl.getStats() : null,
+        matches,
+      })
+      return
+    }
+
     if (req.method === 'GET' && pathname === '/api/rooms') {
       sendJson(res, 200, roomManager.list())
       return

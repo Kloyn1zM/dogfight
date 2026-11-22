@@ -47,6 +47,7 @@ export class Room extends EventEmitter {
     this.persistent = persistent
     this.arena = { ...ARENA_PRESETS[this.difficulty] }
     this.players = new Map()
+    this.match = null
   }
 
   get playerCount() {
@@ -60,6 +61,7 @@ export class Room extends EventEmitter {
   getRoster() {
     return [...this.players.values()].map((p) => ({
       id: p.id,
+      shipId: p.shipId,
       name: p.name,
     }))
   }
@@ -88,7 +90,11 @@ export class Room extends EventEmitter {
     if (this.isFull()) return false
     this.players.set(player.id, player)
     this.emit('join', player)
-    this.recordEvent('join', { playerId: player.id, name: player.name })
+    this.recordEvent('join', {
+      playerId: player.id,
+      shipId: player.shipId,
+      name: player.name,
+    })
     return true
   }
 
@@ -131,6 +137,10 @@ export class RoomManager {
 
   get size() {
     return this.#rooms.size
+  }
+
+  allRooms() {
+    return [...this.#rooms.values()]
   }
 
   totalPlayers() {
@@ -203,7 +213,6 @@ export class RoomManager {
       persistent,
     })
 
-    // Обов'язковий error-слухач на EventEmitter, щоб помилка не звалила процес
     room.on('error', (err) => {
       console.error(`[Room:${room.id}] error:`, err.message)
     })
@@ -231,6 +240,7 @@ export class RoomManager {
   async delete(id) {
     const room = this.#rooms.get(id)
     if (!room) return
+    room.match?.stop()
     this.#rooms.delete(id)
     const log = this.#logs.get(id)
     if (log) {
@@ -244,6 +254,9 @@ export class RoomManager {
   }
 
   async closeAll() {
+    for (const room of this.#rooms.values()) {
+      room.match?.stop()
+    }
     const closing = [...this.#closing]
     for (const log of this.#logs.values()) {
       closing.push(log.close())

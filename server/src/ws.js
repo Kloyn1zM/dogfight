@@ -1,8 +1,12 @@
 import { WebSocket, WebSocketServer } from 'ws'
+import { binaryCodec, jsonCodec } from '@dogfight/shared'
+import { Match } from './match.js'
+import { NetSimulator } from './netSim.js'
 import {
   encodeMessage,
   makeChat,
   makeError,
+  makeEvents,
   makeRoster,
   makeSystem,
   makeWelcome,
@@ -28,6 +32,13 @@ class TokenBucket {
   }
 }
 
+function byteLengthOf(payload) {
+  if (typeof payload === 'string') return Buffer.byteLength(payload, 'utf8')
+  if (payload instanceof ArrayBuffer) return payload.byteLength
+  if (ArrayBuffer.isView(payload)) return payload.byteLength
+  return 0
+}
+
 export function attachWebSocketServer(httpServer, { roomManager, config }) {
   const wss = new WebSocketServer({
     server: httpServer,
@@ -35,9 +46,12 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
     maxPayload: config.maxPayloadBytes,
   })
 
+  const netSim = new NetSimulator()
   let nextPlayerId = 1
   const socketMeta = new Map()
   let droppedSlowMessages = 0
+  let totalBytesIn = 0
+  let totalBytesOut = 0
 
   wss.on('error', (err) => {
     console.error('[WSS] server error:', err.message)
@@ -46,7 +60,6 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
   function safeSend(socket, payload, { critical = false } = {}) {
     if (socket.readyState !== WebSocket.OPEN) return false
 
-    // Slow-client policy: не даємо повільному клієнту залити RAM сервера
     if (socket.bufferedAmount > config.slowClientThresholdBytes) {
       if (socket.bufferedAmount > config.slowClientThresholdBytes * 4) {
         socket.close(4009, 'Slow client buffer overflow')
@@ -58,6 +71,7 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
       }
     }
 
+    totalBytesOut += byteLengthOf(payload)
     socket.send(payload)
     return true
   }
@@ -68,7 +82,39 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
     }
   }
 
-  // Heartbeat: пінг кожні 15 с, розрив після 2 пропущених pong
+  function ensureMatch(room) {
+    if (room.match) return room.match
+    room.match = new Match(room, {
+      onTickBroadcast({
+        room: targetRoom,
+        baseSnapshot,
+        lastProcessedSeqByShip,
+        events,
+      }) {
+        const eventsPayload =
+          events.length > 0 ? makeEvents(baseSnapshot.tick, events) : null
+
+        for (const player of targetRoom.players.values()) {
+          const seq = lastProcessedSeqByShip.get(player.shipId) || 0
+          const personalSnap = { ...baseSnapshot, lastProcessedSeq: seq }
+          const codec = player.codec === 'json' ? jsonCodec : binaryCodec
+          const payload = codec.encodeSnapshot(personalSnap)
+
+          netSim.schedule(
+            () => {
+              safeSend(player.socket, payload, { critical: false })
+              if (eventsPayload) {
+                safeSend(player.socket, eventsPayload, { critical: false })
+              }
+            },
+            { allowDrop: true },
+          )
+        }
+      },
+    })
+    return room.match
+  }
+
   const heartbeatTimer = setInterval(() => {
     for (const [socket, meta] of socketMeta) {
       if (socket.readyState !== WebSocket.OPEN) continue
@@ -103,7 +149,6 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
 
     socketMeta.set(socket, meta)
 
-    // Обов'язковий слухач 'error' на кожному сокеті
     socket.on('error', (err) => {
       console.error('[WS] socket error:', err.message)
     })
@@ -113,17 +158,35 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
     })
 
     socket.on('message', (data, isBinary) => {
+      totalBytesIn += byteLengthOf(data)
+
       if (!meta.bucket.take(1)) {
         safeSend(socket, makeError('Rate limit exceeded'), { critical: true })
         socket.close(4008, 'Rate limit exceeded')
         return
       }
 
+      // Бінарні фрейми: тільки вхідні команди керування (12 байтів, DataView)
       if (isBinary) {
-        safeSend(socket, makeError('Binary frames not supported in v1'), {
-          critical: true,
+        if (!meta.player || !meta.room?.match) {
+          safeSend(socket, makeError('Join room before sending binary input'), {
+            critical: true,
+          })
+          return
+        }
+        let input
+        try {
+          input = binaryCodec.decodeInput(data)
+        } catch (err) {
+          safeSend(socket, makeError(err.message), { critical: true })
+          socket.close(1008, 'Invalid binary input')
+          return
+        }
+        const shipId = meta.player.shipId
+        const match = meta.room.match
+        netSim.schedule(() => match.enqueueInput(shipId, input), {
+          allowDrop: true,
         })
-        socket.close(1003, 'Text JSON expected in v1')
         return
       }
 
@@ -137,7 +200,30 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
       const { msg } = validation
 
       if (msg.type === 'ping') {
-        safeSend(socket, encodeMessage({ type: 'pong', t: msg.t }))
+        const pongPayload = encodeMessage({ type: 'pong', t: msg.t })
+        netSim.schedule(
+          () => {
+            netSim.schedule(
+              () => safeSend(socket, pongPayload, { critical: false }),
+              { allowDrop: false },
+            )
+          },
+          { allowDrop: false },
+        )
+        return
+      }
+
+      if (msg.type === 'netcfg') {
+        netSim.configure(msg)
+        const cfgPayload = encodeMessage({
+          type: 'netcfg',
+          ...netSim.getConfig(),
+        })
+        if (meta.room) {
+          broadcastRoom(meta.room, cfgPayload, { critical: true })
+        } else {
+          safeSend(socket, cfgPayload, { critical: true })
+        }
         return
       }
 
@@ -158,9 +244,12 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
           return
         }
 
+        const shipId = nextPlayerId++
         const player = {
-          id: `p${nextPlayerId++}`,
+          id: `p${shipId}`,
+          shipId,
           name: msg.name,
+          codec: msg.codec || 'binary',
           socket,
           joinedAt: Date.now(),
         }
@@ -171,12 +260,20 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
           return
         }
 
+        const match = ensureMatch(room)
+        match.addPlayer(player.shipId)
+
         clearTimeout(meta.joinTimer)
         meta.joinTimer = null
         meta.player = player
         meta.room = room
 
-        safeSend(socket, makeWelcome(player, room), { critical: true })
+        safeSend(socket, makeWelcome(player, room, match), { critical: true })
+        safeSend(
+          socket,
+          encodeMessage({ type: 'netcfg', ...netSim.getConfig() }),
+          { critical: true },
+        )
         broadcastRoom(room, makeRoster(room), { critical: true })
         broadcastRoom(room, makeSystem(`${player.name} приєднався до кімнати`))
         return
@@ -185,6 +282,25 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
       if (!meta.player || !meta.room) {
         safeSend(socket, makeError('Send join first'), { critical: true })
         socket.close(4002, 'Not joined')
+        return
+      }
+
+      if (msg.type === 'codec') {
+        meta.player.codec = msg.mode
+        safeSend(
+          socket,
+          encodeMessage({ type: 'codec', mode: meta.player.codec }),
+          { critical: true },
+        )
+        return
+      }
+
+      if (msg.type === 'input') {
+        const shipId = meta.player.shipId
+        const match = meta.room.match
+        netSim.schedule(() => match?.enqueueInput(shipId, msg), {
+          allowDrop: true,
+        })
         return
       }
 
@@ -199,6 +315,7 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
       socketMeta.delete(socket)
 
       if (meta.player && meta.room) {
+        meta.room.match?.removePlayer(meta.player.shipId)
         const left = meta.room.leave(meta.player.id)
         if (left) {
           broadcastRoom(meta.room, makeRoster(meta.room), { critical: true })
@@ -210,10 +327,14 @@ export function attachWebSocketServer(httpServer, { roomManager, config }) {
 
   return {
     wss,
+    netSim,
     getStats() {
       return {
         connections: socketMeta.size,
         droppedSlowMessages,
+        totalBytesIn,
+        totalBytesOut,
+        netSim: netSim.getConfig(),
       }
     },
     async closeAllSockets() {

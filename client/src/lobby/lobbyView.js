@@ -9,7 +9,7 @@ export function mountLobbyView(container, lobby) {
     <div class="lobby-card">
       <div class="lobby-header">
         <h1>DOGFIGHT</h1>
-        <span class="badge">Lab 04 · Node + WS</span>
+        <span class="badge">Lab 05 · Realtime Net</span>
       </div>
       <label class="field">
         <span>Позивний пілота</span>

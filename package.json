@@ -3,15 +3,16 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["client", "server"],
+  "workspaces": ["shared", "client", "server"],
   "scripts": {
     "dev:client": "npm --workspace=client run dev",
     "dev:server": "npm --workspace=server run dev",
     "build": "npm --workspace=client run build",
     "start": "npm --workspace=server run start",
     "test": "npm --workspace=server run test",
-    "lint": "eslint client/src server/src server/test",
-    "format": "prettier --write client/src client/index.html server/src server/test"
+    "bench:codec": "node server/scripts/bench-codec.js",
+    "lint": "eslint shared/src client/src server/src server/test server/scripts",
+    "format": "prettier --write shared/src client/src client/index.html server/src server/test server/scripts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

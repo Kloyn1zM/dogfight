@@ -8,6 +8,17 @@ export default [
   },
   js.configs.recommended,
   {
+    files: ['shared/src/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      globals: {},
+    },
+    rules: {
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    },
+  },
+  {
     files: ['client/src/**/*.js'],
     languageOptions: {
       ecmaVersion: 2024,
@@ -19,7 +30,11 @@ export default [
     },
   },
   {
-    files: ['server/src/**/*.js', 'server/test/**/*.js'],
+    files: [
+      'server/src/**/*.js',
+      'server/test/**/*.js',
+      'server/scripts/**/*.js',
+    ],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'module',

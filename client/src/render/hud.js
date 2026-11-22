@@ -1,8 +1,8 @@
 /**
- * HUD-модуль: слухає події World через EventTarget (score, pickup, exploded)
- * і показує спливаючі сповіщення без жодних імпортів у src/sim/.
+ * HUD-модуль: підписаний на EventTarget-шину NetWorld і відображає
+ * метрики циклу, HP, SCORE, активні бафи та спливаючі сповіщення.
  */
-export function createHud(world) {
+export function createHud(netWorld) {
   const notices = []
 
   const pushNotice = (text, color) => {
@@ -24,19 +24,14 @@ export function createHud(world) {
     if (e.detail?.kind === 'ship') pushNotice('SHIP DESTROYED', '#f87171')
   }
 
-  world.events.addEventListener('score', onScore)
-  world.events.addEventListener('pickup', onPickup)
-  world.events.addEventListener('exploded', onExploded)
+  netWorld.events.addEventListener('score', onScore)
+  netWorld.events.addEventListener('pickup', onPickup)
+  netWorld.events.addEventListener('exploded', onExploded)
 
   function draw(
     ctx,
     stats,
-    {
-      paused = false,
-      playerName = 'Pilot',
-      roomName = 'Arena',
-      muted = false,
-    } = {},
+    { playerName = 'Pilot', roomName = 'Arena', muted = false } = {},
   ) {
     const dt = Math.min((stats.frameTimeMs || 16.67) / 1000, 0.1)
     for (let i = notices.length - 1; i >= 0; i -= 1) {
@@ -44,72 +39,64 @@ export function createHud(world) {
       if (notices[i].ttl <= 0) notices.splice(i, 1)
     }
 
-    const player = world.getPlayer()
+    const ship = netWorld.getLocalShip()
 
     ctx.fillStyle = '#e5e7eb'
-    ctx.font = '15px ui-monospace, SFMono-Regular, Menlo, monospace'
-    ctx.fillText(`steps/s   ${stats.stepsPerSecond}`, 24, 34)
-    ctx.fillText(`frames/s  ${stats.framesPerSecond}`, 24, 56)
-    ctx.fillText(`frame ms  ${stats.frameTimeMs.toFixed(2)}`, 24, 78)
+    ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, monospace'
+    ctx.fillText(`steps/s   ${stats.stepsPerSecond} (30 Hz net)`, 20, 30)
+    ctx.fillText(`frames/s  ${stats.framesPerSecond}`, 20, 50)
+    ctx.fillText(`frame ms  ${stats.frameTimeMs.toFixed(2)}`, 20, 70)
 
     ctx.fillStyle = '#38bdf8'
-    ctx.fillText(`${playerName} @ ${roomName}`, 24, 108)
+    ctx.fillText(`${playerName} @ ${roomName}`, 20, 98)
 
-    ctx.fillStyle = '#facc15'
-    ctx.fillText(`SCORE     ${world.score}`, 24, 132)
+    if (ship) {
+      ctx.fillStyle = '#facc15'
+      ctx.fillText(`SCORE     ${ship.score}`, 20, 120)
 
-    if (player && player.alive) {
-      ctx.fillStyle = player.hp > 35 ? '#4ade80' : '#f87171'
-      ctx.fillText(`HP        ${player.hp}/${player.maxHp}`, 24, 154)
-
-      let buffY = 176
-      if (player.shieldActive) {
-        ctx.fillStyle = '#38bdf8'
-        ctx.fillText(`SHIELD    ${player.shieldTimer.toFixed(1)}s`, 24, buffY)
-        buffY += 22
-      }
-      if (player.rapidFireActive) {
-        ctx.fillStyle = '#f59e0b'
-        ctx.fillText(
-          `RAPID     ${player.rapidFireTimer.toFixed(1)}s`,
-          24,
-          buffY,
-        )
+      if (ship.alive) {
+        ctx.fillStyle = ship.hp > 35 ? '#4ade80' : '#f87171'
+        ctx.fillText(`HP        ${ship.hp}/100`, 20, 140)
+        if (ship.shieldTimer > 0) {
+          ctx.fillStyle = '#38bdf8'
+          ctx.fillText('SHIELD ACTIVE', 20, 160)
+        }
+        if (ship.rapidFireTimer > 0) {
+          ctx.fillStyle = '#f59e0b'
+          ctx.fillText('RAPID FIRE', 20, ship.shieldTimer > 0 ? 180 : 160)
+        }
+      } else {
+        ctx.fillStyle = '#f87171'
+        ctx.fillText('DESTROYED — RESPAWNING...', 20, 140)
       }
     } else {
-      ctx.fillStyle = '#f87171'
-      ctx.fillText(`RESPAWN   ${world.respawnTimer.toFixed(1)}s`, 24, 154)
+      ctx.fillStyle = '#94a3b8'
+      ctx.fillText('Очікуємо снапшот сервера...', 20, 120)
     }
 
-    // Спливаючі події (справа вгорі)
-    const rightX = ctx.canvas.clientWidth - 24
+    // Спливаючі сповіщення по центру зверху
+    const centerX = ctx.canvas.clientWidth / 2
     ctx.save()
-    ctx.textAlign = 'right'
+    ctx.textAlign = 'center'
     notices.forEach((n, idx) => {
       ctx.globalAlpha = Math.max(0, n.ttl / n.maxTtl)
       ctx.fillStyle = n.color
-      ctx.fillText(n.text, rightX, 36 + idx * 24)
+      ctx.fillText(n.text, centerX, 34 + idx * 22)
     })
     ctx.restore()
 
     ctx.fillStyle = '#9ca3af'
     ctx.fillText(
-      `W/A/D — політ · Пробіл/Клік — постріл · E — homing · M — звук(${muted ? 'OFF' : 'ON'}) · P — пауза · Esc — лобі`,
-      24,
-      ctx.canvas.clientHeight - 24,
+      `W/A/D — політ · Пробіл/Клік — постріл · E — homing · M — звук(${muted ? 'OFF' : 'ON'}) · Esc — лобі`,
+      20,
+      ctx.canvas.clientHeight - 18,
     )
-
-    if (paused) {
-      ctx.fillStyle = '#fb923c'
-      ctx.font = 'bold 20px ui-monospace, SFMono-Regular, Menlo, monospace'
-      ctx.fillText('PAUSED', 24, 212)
-    }
   }
 
   function destroy() {
-    world.events.removeEventListener('score', onScore)
-    world.events.removeEventListener('pickup', onPickup)
-    world.events.removeEventListener('exploded', onExploded)
+    netWorld.events.removeEventListener('score', onScore)
+    netWorld.events.removeEventListener('pickup', onPickup)
+    netWorld.events.removeEventListener('exploded', onExploded)
     notices.length = 0
   }
 
