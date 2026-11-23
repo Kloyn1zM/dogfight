@@ -3,22 +3,31 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["shared", "client", "server"],
+  "workspaces": [
+    "shared",
+    "client",
+    "server"
+  ],
   "scripts": {
     "dev:client": "npm --workspace=client run dev",
     "dev:server": "npm --workspace=server run dev",
     "build": "npm --workspace=client run build",
     "start": "npm --workspace=server run start",
     "test": "npm --workspace=server run test",
-    "bench:codec": "node server/scripts/bench-codec.js",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "bench:codec": "node --import tsx server/scripts/bench-codec.ts",
     "lint": "eslint shared/src client/src server/src server/test server/scripts",
     "format": "prettier --write shared/src client/src client/index.html server/src server/test server/scripts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.12.0",
-    "prettier": "^3.9.6"
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0"
   }
 }

@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --env-file=../.env src/index.js",
-    "start": "node --env-file=../.env src/index.js",
-    "test": "node --test test/*.test.js"
+    "dev": "node --watch --import tsx --env-file=../.env src/index.ts",
+    "start": "node --import tsx --env-file=../.env src/index.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@dogfight/shared": "*",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
   }
 }

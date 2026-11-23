@@ -305,3 +305,44 @@ Node.js виконує JavaScript-код в **одному потоці** пов
 
 3. **Компроміс затримки інтерполяції (`interpolationDelayMs = 80 ms`):**
    На `30 Hz` інтервал між снапшотами становить `33.3 ms`. Буфер інтерполяції `80 ms` (~2.4 снапшоти) дозволяє плавно поглинати мережевий джитер `±30 ms` і поодинокі втрати пакетів (`2% drop`) без ривків та екстраполяції. Ціна компромісу — віддалені кораблі відображаються на ~80 мс у минулому, але для швидкої 2D-арени це оптимальний баланс між плавністю і чуйністю.
+
+   ---
+
+## Lab 06 — TypeScript: Types for the Protocol, the Simulation, and Both Sides of the Wire
+
+### Що реалізовано
+- **Сувора конфігурація TypeScript (`tsconfig.base.json` + per-package `tsconfig.json`):** увімкнено `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `isolatedModules` у всіх трьох пакетах (`shared/`, `server/`, `client/`); кореневий `npm run typecheck` перевіряє весь монорепозиторій і запускається в GitHub Actions (`.github/workflows/ci.yml`).
+- **Типізований `@dogfight/shared` (`shared/src/`):** незмінний `Vector2` (`readonly x, y`), брендовані ідентифікатори (`EntityId`, `Tick`, `Seq`), дискриміновані союзи (`SnapshotEntity`, `MatchEvent`, `ClientMessage`, `ServerMessage`), інтерфейс `Codec` із двома реалізаціями (`jsonCodec`, `binaryCodec`) і вичерпні `switch` із `assertNever(never)` у кожному диспетчері.
+- **Єдине джерело правди для протоколу (`shared/src/protocol.ts`):** усі JSON-повідомлення в обидва боки описані через **Zod-схеми** (`ClientMessageSchema`, `ServerMessageSchema`), TS-типи виводяться через `z.infer`, а ручний валідатор із Lab 4 видалений. Конфіг сервера (`server/src/config.ts`) і тіло `POST /api/rooms` також валідуються через Zod; у всіх `catch (err: unknown)` виконується безпечне звуження.
+- **Типізовані події:** `Room extends EventEmitter<RoomEvents>` на сервері та узагальнена шина `TypedBus<E>` на клієнті (`NetWorld`, `GameConnection`, `Lobby`).
+- **Дисципліна типів і збереження поведінки:** **`0` `any`** у всьому репозиторії та рівно **`3` обґрунтовані `as`-касти** (лише в zero-cost конструкторах брендів `asEntityId`, `asTick`, `asSeq` у `shared/src/types.ts`). Усі 6 тестів проходять (`pass 6, fail 0`), тест детермінізму `shared/` дає незмінний хеш **`babcfb7b`**, а бінарний кодек зберігає перевагу **`7.04×`** за розміром (`926 B` проти `6516 B`, `4.94 µs` проти `152.01 µs`).
+
+### Рішення щодо UI-фреймворку (M4)
+Лобі, панель чату й Netgraph залишено на **vanilla TypeScript + `TypedBus<E>`** (без React/Vue/Svelte), а ігровий цикл і Canvas 2D — ванільними:
+- Інтерфейс складається з 3 невеликих оверлеїв без складного роутингу чи глибокого дерева станів.
+- Відмова від фреймворку зберігає компактний продакшн-бандл клієнта (**`138.13 kB` / `42.18 kB gzip`**, збірка за `271 ms`), нульовий runtime-overhead поруч із 60–144 Hz рендером і прозору подієву архітектуру.
+
+### Що реально знайшов TypeScript під час міграції ("What TypeScript found")
+1. **Підміна брендованого `Tick` сирим `number` у Zod-схемі (`shared/src/protocol.ts`):** `TickSchema.optional().default(0)` не скомпілювався — `tsc` вказав, що дефолтне значення `0` має тип `number`, а не `Tick`, змусивши явно передати `asTick(0)`.
+2. **Скидання control-flow narrowing у вкладених функціях (`lobbyView.ts`, `roomPanel.ts`, `netPanel.ts`, `canvas.ts`):** перевірка `if (!(el instanceof ...)) throw` у зовнішній функції не зберігалася всередині вкладених `function`-оголошень через hoisting; проблему вирішено типізованим хелпером `requireEl<T>(root, selector, ctor)` у `client/src/dom.ts` без жодного `as`-касту.
+3. **Потенційний `undefined` при індексації масивів (`noUncheckedIndexedAccess`):** у `netWorld.ts` (`buf[0]`, `#pendingInputs[0]`), `match.ts` (`sorted[idx]`) та `world.ts` (`astList[i]`) компілятор вимагав явних перевірок перед читанням полів.
+4. **Небезпечні `EventTarget` та `JSON.parse`:** `e.target` у `input.ts` має тип `EventTarget | null`, а не гарантовано `HTMLElement` (замінено на `el instanceof HTMLElement`), а всі вхідні дані з мережі та `catch` тепер типізовані як `unknown` і проходять через Zod або type guards (`isAssetManifest`).
+5. **Оточення клієнта vs сервера (`vite/client` і таймери):** підключення `"types": ["vite/client"]` у `client/tsconfig.json` дало типізацію для `import './style.css'` та прибрало конфлікт типів `setTimeout` із `@types/node` (у клієнті використано `window.setTimeout` / `window.setInterval`).
+
+### Три найцікавіші типи в проєкті (пояснення для JS-розробника)
+
+1. **Discriminated Union + `never`-вичерпність (`ClientMessage`, `shared/src/protocol.ts`):**
+   Об’єднання кількох форм об’єктів зі спільним літеральним полем `type` (`'join' | 'chat' | 'input' | ...`). У кожному `case` компілятор автоматично звужує тип до потрібного варіанту, а `default: assertNever(msg)` зламає збірку, якщо додати новий тип повідомлення і забути обробити його в `server/src/ws.ts`.
+
+2. **Branded Types (`EntityId`, `Tick`, `Seq`, `shared/src/types.ts`):**
+   ~~~ts
+   export type EntityId = number & { readonly __brand: 'EntityId' }
+   export type Tick = number & { readonly __brand: 'Tick' }
+   ~~~
+   У рантаймі це звичайні числа (нуль накладних витрат), але компілятор забороняє передати номер тику `Tick` туди, де очікується `EntityId` корабля або `Seq` команди.
+
+3. **Узагальнена типізована шина подій (`TypedBus<E>`, `shared/src/bus.ts`):**
+   ~~~ts
+   on<K extends keyof E>(name: K, fn: (payload: E[K]) => void): () => void
+   ~~~
+   Параметр `K extends keyof E` дозволяє підписатися лише на реально оголошені події, а індексний тип `E[K]` автоматично підставляє точну форму `payload` (наприклад, для `'score'` це `{ delta: number; total: number }`), перетворюючи опечатки в назвах подій або полів на помилки компіляції.
