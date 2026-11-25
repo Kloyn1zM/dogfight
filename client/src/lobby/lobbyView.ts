@@ -25,7 +25,7 @@ export function mountLobbyView(
     <div class="lobby-card">
       <div class="lobby-header">
         <h1>DOGFIGHT</h1>
-        <span class="badge">Lab 06 · TypeScript</span>
+        <span class="badge">Lab 07 · V8 &amp; Tests</span>
       </div>
       <label class="field">
         <span>Позивний пілота</span>

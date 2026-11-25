@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch --import tsx --env-file=../.env src/index.ts",
     "start": "node --import tsx --env-file=../.env src/index.ts",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "vitest run --root .. server/test",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

@@ -45,6 +45,25 @@ import { NetWorld } from './net/netWorld.ts'
 import { mountRoomPanel } from './ui/roomPanel.ts'
 import { mountNetPanel } from './ui/netPanel.ts'
 import { requireEl } from './dom.ts'
+import { createFramePerfRecorder, type PerfReport } from './perf.ts'
+
+interface DogfightDebugShip {
+  readonly id: number
+  readonly name: string
+  readonly isLocal: boolean
+  readonly x: number
+  readonly y: number
+  readonly angle: number
+}
+
+declare global {
+  interface Window {
+    __dogfight?: {
+      getShips(): readonly DogfightDebugShip[]
+      getPerfReport(): PerfReport | null
+    }
+  }
+}
 
 function logBrowserDeterminismHash(): void {
   const ship = createShipState({
@@ -72,9 +91,36 @@ const params = new URLSearchParams(window.location.search)
 const devDelayMs = Number(params.get('delay') ?? 0)
 const devSequential = params.get('seq') === '1'
 const devFailMode = params.get('fail') ?? ''
+const devPerfSec = Number(params.get('perf') ?? 0)
+
+const perfRecorder = createFramePerfRecorder(devPerfSec, (report) => {
+  console.log('[Perf] Frame report:', JSON.stringify(report))
+})
 
 const input = createInput(window)
 const netWorld = new NetWorld()
+window.__dogfight = {
+  getShips() {
+    const rs = netWorld.getRenderState(performance.now(), 1)
+    const ships: DogfightDebugShip[] = []
+    for (const e of rs.entities) {
+      if (e.kind === 'ship') {
+        ships.push({
+          id: e.id,
+          name: e.name,
+          isLocal: e.isLocal,
+          x: e.x,
+          y: e.y,
+          angle: e.angle,
+        })
+      }
+    }
+    return ships
+  },
+  getPerfReport() {
+    return perfRecorder.getReport()
+  },
+}
 const hud = createHud(netWorld)
 const audio = createAudioManager()
 audio.attachBus(netWorld.events)
@@ -135,6 +181,15 @@ connection.events.on('snapshot', ({ snapshot, receivedAt }) => {
   netWorld.onSnapshot(snapshot, receivedAt)
 })
 
+connection.events.on('binarySnapshot', ({ data, receivedAt }) => {
+  try {
+    netWorld.onBinarySnapshot(data, receivedAt)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn('[WS] failed to decode binary snapshot:', msg)
+  }
+})
+
 connection.events.on('events', (msg) => {
   netWorld.onServerEvents(msg.events)
 })
@@ -170,9 +225,11 @@ function render(alpha: number, stats: LoopStats): void {
     playerName: activePlayerName,
     roomName: activeRoom?.name ?? 'Arena',
     muted: audio.isMuted(),
+    perfText: perfRecorder.getStatusText(now),
   })
 
   netPanel.update(now)
+  perfRecorder.recordFrame(now, stats.frameTimeMs, stats.workTimeMs)
 }
 
 const loop = createLoop({
@@ -199,6 +256,7 @@ function startPlaying(assets: LoadedAssets): void {
   setLoadingControls('')
   mode = 'playing'
   netWorld.reset()
+  perfRecorder.reset()
   roomPanel.show(activeRoom?.name)
   netPanel.show()
   if (activeRoom) {

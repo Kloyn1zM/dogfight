@@ -1,6 +1,10 @@
 # Logs
 logs
 server/logs
+server/logs-e2e
+logs-e2e
+server/logs-load
+logs-load
 *.log
 *.ndjson
 npm-debug.log*
@@ -12,10 +16,14 @@ lerna-debug.log*
 # Env secrets/local config
 .env
 .env.local
+requirements.txt
 
 node_modules
 dist
 dist-ssr
+coverage
+playwright-report
+test-results
 *.local
 
 # Editor directories and files

@@ -12,7 +12,12 @@ export interface HudController {
   draw(
     ctx: CanvasRenderingContext2D,
     stats: LoopStats,
-    opts?: { playerName?: string; roomName?: string; muted?: boolean },
+    opts?: {
+      playerName?: string
+      roomName?: string
+      muted?: boolean
+      perfText?: string | null
+    },
   ): void
   destroy(): void
 }
@@ -46,7 +51,13 @@ export function createHud(netWorld: NetWorld): HudController {
       playerName = 'Pilot',
       roomName = 'Arena',
       muted = false,
-    }: { playerName?: string; roomName?: string; muted?: boolean } = {},
+      perfText = null,
+    }: {
+      playerName?: string
+      roomName?: string
+      muted?: boolean
+      perfText?: string | null
+    } = {},
   ): void {
     const dt = Math.min((stats.frameTimeMs || 16.67) / 1000, 0.1)
     for (let i = notices.length - 1; i >= 0; i -= 1) {
@@ -100,6 +111,11 @@ export function createHud(netWorld: NetWorld): HudController {
       ctx.fillText(n.text, centerX, 34 + idx * 22)
     })
     ctx.restore()
+
+    if (perfText) {
+      ctx.fillStyle = '#a78bfa'
+      ctx.fillText(perfText, 20, ctx.canvas.clientHeight - 40)
+    }
 
     ctx.fillStyle = '#9ca3af'
     ctx.fillText(

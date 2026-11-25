@@ -5,7 +5,14 @@ import prettier from 'eslint-config-prettier'
 
 export default [
   {
-    ignores: ['**/dist/**', '**/node_modules/**', '**/logs/**'],
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/logs/**',
+      '**/coverage/**',
+      '**/playwright-report/**',
+      '**/test-results/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended.map((cfg) => ({
@@ -21,7 +28,15 @@ export default [
     },
   },
   {
-    files: ['client/src/**/*.{js,ts}'],
+    files: ['shared/test/**/*.ts'],
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      globals: globals.node,
+    },
+  },
+  {
+    files: ['client/src/**/*.{js,ts}', 'client/test/**/*.ts'],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'module',
@@ -38,6 +53,14 @@ export default [
       ecmaVersion: 2024,
       sourceType: 'module',
       globals: globals.node,
+    },
+  },
+  {
+    files: ['e2e/**/*.ts', 'playwright.config.ts', 'vitest.config.ts'],
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      globals: { ...globals.node, ...globals.browser },
     },
   },
   {

@@ -56,8 +56,9 @@ export class Match {
   #timer: ReturnType<typeof setTimeout> | null = null
   #nextTickAt = 0
   #inputQueues = new Map<EntityId, InputCommand[]>()
-  #lastInput = new Map<EntityId, HeldInput>()
+  #lastInput = new Map<EntityId, { turn: InputCommand['turn']; thrust: boolean; fire: boolean; fireHoming: boolean }>()
   #lastProcessedSeq = new Map<EntityId, Seq>()
+  #stepInputs = new Map<EntityId, HeldInput>()
 
   #tickDurations: number[] = []
   #tickJitters: number[] = []
@@ -173,7 +174,7 @@ export class Match {
     const now = performance.now()
     const jitter = Math.abs(now - this.#nextTickAt)
 
-    const inputsByShip = new Map<EntityId, HeldInput>()
+    this.#stepInputs.clear()
     for (const [shipId, queue] of this.#inputQueues) {
       let next = queue.shift()
       if (next) {
@@ -182,20 +183,28 @@ export class Match {
           if (newer) next = newer
         }
         this.#lastProcessedSeq.set(shipId, next.seq)
-        this.#lastInput.set(shipId, {
-          turn: next.turn,
-          thrust: next.thrust,
-          fire: false,
-          fireHoming: false,
-        })
-        inputsByShip.set(shipId, next)
+        const held = this.#lastInput.get(shipId)
+        if (held) {
+          held.turn = next.turn
+          held.thrust = next.thrust
+          held.fire = false
+          held.fireHoming = false
+        } else {
+          this.#lastInput.set(shipId, {
+            turn: next.turn,
+            thrust: next.thrust,
+            fire: false,
+            fireHoming: false,
+          })
+        }
+        this.#stepInputs.set(shipId, next)
       } else {
         const held = this.#lastInput.get(shipId)
-        if (held) inputsByShip.set(shipId, held)
+        if (held) this.#stepInputs.set(shipId, held)
       }
     }
 
-    const events = this.#world.step(TICK_DT, inputsByShip)
+    const events = this.#world.step(TICK_DT, this.#stepInputs)
     const baseSnapshot = this.#world.getSnapshot(asSeq(0))
 
     this.#onTickBroadcast?.({

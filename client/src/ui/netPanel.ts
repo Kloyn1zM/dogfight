@@ -69,6 +69,8 @@ export function mountNetPanel(
     throw new Error('Could not acquire Netgraph 2D context')
   }
   const graphCtx: CanvasRenderingContext2D = rawGraphCtx
+  const statsTextNode = document.createTextNode('')
+  statsEl.appendChild(statsTextNode)
   const corrHistory: number[] = []
   const rttHistory: number[] = []
   const MAX_SAMPLES = 90
@@ -149,11 +151,10 @@ export function mountNetPanel(
     if (corrHistory.length > MAX_SAMPLES) corrHistory.shift()
     if (rttHistory.length > MAX_SAMPLES) rttHistory.shift()
 
-    statsEl.textContent = [
-      `RTT: ${netStats.rttMs.toFixed(1)} ms | Snap age: ${worldStats.snapshotAgeMs.toFixed(0)} ms`,
-      `In: ${(netStats.bytesInPerSec / 1024).toFixed(1)} KB/s | Out: ${(netStats.bytesOutPerSec / 1024).toFixed(2)} KB/s`,
-      `Pending: ${worldStats.pendingInputs} | Corr: ${worldStats.lastCorrectionPx.toFixed(2)} px (max ${worldStats.maxCorrectionPx.toFixed(1)})`,
-    ].join('\n')
+    statsTextNode.nodeValue =
+      `RTT: ${netStats.rttMs.toFixed(1)} ms | Snap age: ${worldStats.snapshotAgeMs.toFixed(0)} ms\n` +
+      `In: ${(netStats.bytesInPerSec / 1024).toFixed(1)} KB/s | Out: ${(netStats.bytesOutPerSec / 1024).toFixed(2)} KB/s\n` +
+      `Pending: ${worldStats.pendingInputs} | Corr: ${worldStats.lastCorrectionPx.toFixed(2)} px (max ${worldStats.maxCorrectionPx.toFixed(1)})`
 
     const w = graphCanvas.width
     const h = graphCanvas.height

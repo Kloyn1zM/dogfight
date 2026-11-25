@@ -39,6 +39,7 @@ export type ConnectionEvents = {
   codec: Extract<ServerMessage, { type: 'codec' }>
   netcfg: Extract<ServerMessage, { type: 'netcfg' }>
   snapshot: { snapshot: Snapshot; receivedAt: number }
+  binarySnapshot: { data: ArrayBuffer; receivedAt: number }
 }
 
 function defaultWsUrl(): string {
@@ -269,13 +270,10 @@ export class GameConnection {
 
       if (event.data instanceof ArrayBuffer) {
         this.#bytesInAccum += event.data.byteLength
-        try {
-          const snapshot = binaryCodec.decodeSnapshot(event.data)
-          this.events.emit('snapshot', { snapshot, receivedAt: now })
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err)
-          console.warn('[WS] failed to decode binary snapshot:', msg)
-        }
+        this.events.emit('binarySnapshot', {
+          data: event.data,
+          receivedAt: now,
+        })
         return
       }
 

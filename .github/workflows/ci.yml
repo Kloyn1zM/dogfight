@@ -29,8 +29,14 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit & determinism tests
-        run: npm test
+      - name: Unit & property tests with coverage (shared >= 85%)
+        run: npm run test:coverage
 
       - name: Build client
         run: npm run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright E2E (2 browsers multiplayer & chat)
+        run: npm run test:e2e

@@ -22,30 +22,7 @@ import {
   parseClientMessage,
 } from './protocol.ts'
 import type { Room, RoomManager, RoomPlayer } from './rooms.ts'
-
-class TokenBucket {
-  readonly rate: number
-  readonly capacity: number
-  tokens: number
-  lastRefill: number
-
-  constructor(ratePerSec: number, burst = ratePerSec) {
-    this.rate = ratePerSec
-    this.capacity = burst
-    this.tokens = burst
-    this.lastRefill = performance.now()
-  }
-
-  take(cost = 1): boolean {
-    const now = performance.now()
-    const elapsedSec = (now - this.lastRefill) / 1000
-    this.lastRefill = now
-    this.tokens = Math.min(this.capacity, this.tokens + elapsedSec * this.rate)
-    if (this.tokens < cost) return false
-    this.tokens -= cost
-    return true
-  }
-}
+import { TokenBucket } from './rateLimit.ts'
 
 interface SocketMeta {
   player: RoomPlayer | null
@@ -233,6 +210,9 @@ export function attachWebSocketServer(
         } catch (err: unknown) {
           const reason =
             err instanceof Error ? err.message : 'Invalid binary input'
+          console.warn(
+            `[WS] invalid binary input from ${meta.player.name}: ${reason}`,
+          )
           safeSend(socket, makeError(reason), { critical: true })
           socket.close(1008, 'Invalid binary input')
           return
@@ -247,6 +227,9 @@ export function attachWebSocketServer(
 
       const parsed = parseClientMessage(buf.toString('utf8'))
       if (!parsed.ok) {
+        console.warn(
+          `[WS] invalid client message from ${meta.player?.name ?? 'unjoined'} (${parsed.code}): ${parsed.reason}`,
+        )
         safeSend(socket, makeError(parsed.reason), { critical: true })
         socket.close(parsed.code, parsed.reason)
         return

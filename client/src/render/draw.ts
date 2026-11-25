@@ -170,7 +170,7 @@ export function drawMultiplayerArena(
         drawShip(ctx, entity, spriteSheet)
         break
       case 'bullet':
-        drawBullet(ctx, entity)
+        drawBullet(ctx, entity, spriteSheet)
         break
       case 'asteroid':
         drawAsteroid(ctx, entity, spriteSheet)
@@ -276,22 +276,30 @@ function drawShip(
   ctx.restore()
 }
 
-function drawBullet(ctx: CanvasRenderingContext2D, bullet: RenderBullet): void {
+function drawBullet(
+  ctx: CanvasRenderingContext2D,
+  bullet: RenderBullet,
+  sheet: HTMLImageElement | null,
+): void {
   ctx.save()
   ctx.translate(bullet.x, bullet.y)
   ctx.rotate(bullet.angle)
-  ctx.fillStyle = bullet.isHoming ? '#c084fc' : '#facc15'
   if (bullet.predicted) ctx.globalAlpha = 0.85
-  ctx.beginPath()
-  if (bullet.isHoming) {
-    ctx.moveTo(8, 0)
-    ctx.lineTo(-5, -4)
-    ctx.lineTo(-5, 4)
-    ctx.closePath()
+  if (sheet) {
+    drawSpriteCell(ctx, sheet, bullet.isHoming ? 5 : 4, bullet.isHoming ? 22 : 16)
   } else {
-    ctx.arc(0, 0, 4, 0, Math.PI * 2)
+    ctx.fillStyle = bullet.isHoming ? '#c084fc' : '#facc15'
+    ctx.beginPath()
+    if (bullet.isHoming) {
+      ctx.moveTo(8, 0)
+      ctx.lineTo(-5, -4)
+      ctx.lineTo(-5, 4)
+      ctx.closePath()
+    } else {
+      ctx.arc(0, 0, 4, 0, Math.PI * 2)
+    }
+    ctx.fill()
   }
-  ctx.fill()
   ctx.restore()
 }
 
@@ -366,10 +374,15 @@ function drawExplosion(
   ctx.save()
   ctx.globalAlpha = ratio
   ctx.fillStyle = explosion.color
-  for (const p of explosion.particles) {
-    ctx.beginPath()
-    ctx.arc(p.x, p.y, p.r * ratio, 0, Math.PI * 2)
-    ctx.fill()
+  ctx.beginPath()
+  const particles = explosion.particles
+  for (let i = 0; i < particles.length; i += 1) {
+    const p = particles[i]
+    if (!p) continue
+    const r = p.r * ratio
+    ctx.moveTo(p.x + r, p.y)
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
   }
+  ctx.fill()
   ctx.restore()
 }

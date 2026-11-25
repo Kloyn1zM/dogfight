@@ -13,21 +13,31 @@
     "dev:server": "npm --workspace=server run dev",
     "build": "npm --workspace=client run build",
     "start": "npm --workspace=server run start",
-    "test": "npm --workspace=server run test",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc --noEmit -p tsconfig.e2e.json",
     "bench:codec": "node --import tsx server/scripts/bench-codec.ts",
-    "lint": "eslint shared/src client/src server/src server/test server/scripts",
-    "format": "prettier --write shared/src client/src client/index.html server/src server/test server/scripts"
+    "bench:perf": "node --import tsx server/scripts/bench-perf.ts",
+    "bench:worker": "node --import tsx server/scripts/bench-worker.ts",
+    "bench:load": "node --import tsx server/scripts/load-test.ts",
+    "bots": "node --import tsx server/scripts/bots.ts",
+    "lint": "eslint shared/src shared/test client/src client/test server/src server/test server/scripts e2e playwright.config.ts vitest.config.ts",
+    "format": "prettier --write shared/src shared/test client/src client/test client/index.html server/src server/test server/scripts e2e playwright.config.ts vitest.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.65.1",
     "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^5.1.1",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
+    "fast-check": "^4.11.0",
     "globals": "^17.12.0",
     "prettier": "^3.9.6",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.73.0"
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^5.1.1"
   }
 }

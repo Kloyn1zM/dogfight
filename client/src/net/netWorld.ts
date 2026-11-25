@@ -2,16 +2,21 @@ import {
   BULLET_RADIUS,
   FIRE_COOLDOWN,
   HOMING_COOLDOWN,
+  ObjectPool,
   RAPID_FIRE_COOLDOWN,
   TICK_DT,
   TypedBus,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  asEntityId,
   asSeq,
   asTick,
   assertNever,
   cloneShipState,
+  copyShipState,
+  createReusableSnapshotBuffer,
   createShipState,
+  decodeSnapshotBinaryInto,
   integrateShip,
   normalizeAngle,
   shortestAngleDiff,
@@ -20,14 +25,22 @@ import {
   type InputCommand,
   type MatchEvent,
   type PickupEffect,
+  type ReusableSnapshotBuffer,
   type RosterEntry,
   type ShipSnapshot,
   type ShipState,
   type Snapshot,
   type SnapshotEntity,
   type Tick,
+  type TurnDirection,
 } from '@dogfight/shared'
-import type { LocalCommand } from '../input.ts'
+
+export interface LocalCommandInput {
+  readonly turn: TurnDirection
+  readonly thrust: boolean
+  readonly fire: boolean
+  readonly fireHoming: boolean
+}
 
 export type GameEvents = {
   fired: { ownerId: EntityId; homing: boolean }
@@ -86,6 +99,52 @@ export interface RenderPickup {
 export type RenderEntity =
   RenderShip | RenderBullet | RenderAsteroid | RenderPickup
 
+interface MutableRenderShip {
+  kind: 'ship'
+  id: EntityId
+  isLocal: boolean
+  name: string
+  x: number
+  y: number
+  angle: number
+  radius: number
+  thrusting: boolean
+  shieldActive: boolean
+  rapidFireActive: boolean
+  hp: number
+  score: number
+}
+
+interface MutableRenderBullet {
+  kind: 'bullet'
+  id: EntityId | string
+  x: number
+  y: number
+  angle: number
+  isHoming: boolean
+  predicted: boolean
+}
+
+interface MutableRenderAsteroid {
+  kind: 'asteroid'
+  id: EntityId
+  x: number
+  y: number
+  angle: number
+  isHoming: boolean
+  radius: number
+}
+
+interface MutableRenderPickup {
+  kind: 'pickup'
+  id: EntityId
+  x: number
+  y: number
+  angle: number
+  effect: PickupEffect
+  radius: number
+}
+
 export interface ExplosionParticle {
   x: number
   y: number
@@ -96,8 +155,8 @@ export interface ExplosionParticle {
 
 export interface RenderExplosion {
   ttl: number
-  readonly maxTtl: number
-  readonly color: string
+  maxTtl: number
+  color: string
   readonly particles: ExplosionParticle[]
 }
 
@@ -115,14 +174,24 @@ export interface NetWorldMetrics {
   readonly bufferSize: number
 }
 
-interface BufferedSnapshot {
-  readonly receivedAt: number
-  readonly snapshot: Snapshot
-  readonly byId: ReadonlyMap<EntityId, SnapshotEntity>
+export interface NetWorldPoolStats {
+  readonly predictedBulletsCreated: number
+  readonly predictedBulletsReused: number
+  readonly particlesCreated: number
+  readonly particlesReused: number
+  readonly explosionsCreated: number
+  readonly explosionsReused: number
+}
+
+interface BufferedSnapshotSlot {
+  receivedAt: number
+  snapshot: Snapshot
+  readonly decodeBuf: ReusableSnapshotBuffer
+  readonly byId: Map<EntityId, SnapshotEntity>
 }
 
 interface PredictedBullet {
-  readonly tempId: string
+  tempId: string
   x: number
   y: number
   prevX: number
@@ -134,6 +203,8 @@ interface PredictedBullet {
   isHoming: boolean
   ttl: number
 }
+
+const SNAPSHOT_BUFFER_CAPACITY = 24
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t
@@ -153,11 +224,53 @@ function wrapDelta(delta: number, size: number): number {
 export class NetWorld {
   readonly events = new TypedBus<GameEvents>()
 
-  #snapshotBuffer: BufferedSnapshot[] = []
+  #snapshotPool: BufferedSnapshotSlot[] = []
+  #snapshotBuffer: BufferedSnapshotSlot[] = []
   #pendingInputs: InputCommand[] = []
   #predictedBullets: PredictedBullet[] = []
   #explosions: RenderExplosion[] = []
   #rosterByShipId = new Map<EntityId, string>()
+
+  #predictedBulletPool = new ObjectPool<PredictedBullet>(
+    () => ({
+      tempId: '',
+      x: 0,
+      y: 0,
+      prevX: 0,
+      prevY: 0,
+      vx: 0,
+      vy: 0,
+      angle: 0,
+      radius: BULLET_RADIUS,
+      isHoming: false,
+      ttl: 0,
+    }),
+    { initialSize: 32, maxSize: 256 },
+  )
+
+  #particlePool = new ObjectPool<ExplosionParticle>(
+    () => ({ x: 0, y: 0, vx: 0, vy: 0, r: 2 }),
+    { initialSize: 128, maxSize: 1024 },
+  )
+
+  #explosionPool = new ObjectPool<RenderExplosion>(
+    () => ({ ttl: 0, maxTtl: 0.5, color: '#fb923c', particles: [] }),
+    {
+      initialSize: 16,
+      maxSize: 128,
+      reset(ex) {
+        ex.particles.length = 0
+      },
+    },
+  )
+
+  // Перевикористовувані буфери для getRenderState (0 алокацій на кадр у steady-state)
+  #renderEntities: RenderEntity[] = []
+  #renderShips: MutableRenderShip[] = []
+  #renderBullets: MutableRenderBullet[] = []
+  #renderAsteroids: MutableRenderAsteroid[] = []
+  #renderPickups: MutableRenderPickup[] = []
+  #renderState: RenderState
 
   #localShip: ShipState | null = null
   #prevLocalShip: ShipState | null = null
@@ -178,11 +291,39 @@ export class NetWorld {
   interpolationDelayMs = 80
   breakDeterminism = false
 
+  constructor() {
+    this.#renderState = {
+      entities: this.#renderEntities,
+      explosions: this.#explosions,
+    }
+    for (let i = 0; i < SNAPSHOT_BUFFER_CAPACITY + 2; i += 1) {
+      const decodeBuf = createReusableSnapshotBuffer()
+      this.#snapshotPool.push({
+        receivedAt: 0,
+        snapshot: decodeBuf,
+        decodeBuf,
+        byId: new Map(),
+      })
+    }
+  }
+
   reset(): void {
-    this.#snapshotBuffer.length = 0
+    while (this.#snapshotBuffer.length > 0) {
+      const slot = this.#snapshotBuffer.pop()
+      if (slot) {
+        slot.byId.clear()
+        this.#snapshotPool.push(slot)
+      }
+    }
     this.#pendingInputs.length = 0
-    this.#predictedBullets.length = 0
-    this.#explosions.length = 0
+    while (this.#predictedBullets.length > 0) {
+      const pb = this.#predictedBullets.pop()
+      if (pb) this.#predictedBulletPool.release(pb)
+    }
+    while (this.#explosions.length > 0) {
+      const ex = this.#explosions.pop()
+      if (ex) this.#releaseExplosion(ex)
+    }
     this.#rosterByShipId.clear()
 
     this.myShipId = null
@@ -203,7 +344,10 @@ export class NetWorld {
     this.myShipId = shipId
     this.#latestServerTick = tick
     this.#pendingInputs.length = 0
-    this.#predictedBullets.length = 0
+    while (this.#predictedBullets.length > 0) {
+      const pb = this.#predictedBullets.pop()
+      if (pb) this.#predictedBulletPool.release(pb)
+    }
     this.#localShip = null
     this.#prevLocalShip = null
     this.#errorX = 0
@@ -240,11 +384,22 @@ export class NetWorld {
     }
   }
 
+  getPoolStats(): NetWorldPoolStats {
+    return {
+      predictedBulletsCreated: this.#predictedBulletPool.created,
+      predictedBulletsReused: this.#predictedBulletPool.reused,
+      particlesCreated: this.#particlePool.created,
+      particlesReused: this.#particlePool.reused,
+      explosionsCreated: this.#explosionPool.created,
+      explosionsReused: this.#explosionPool.reused,
+    }
+  }
+
   resetCorrectionPeak(): void {
     this.#maxCorrectionPx = 0
   }
 
-  stepLocal(command: LocalCommand, dt = TICK_DT): InputCommand | null {
+  stepLocal(command: LocalCommandInput, dt = TICK_DT): InputCommand | null {
     const smoothFactor = Math.exp(-dt / 0.085)
     this.#errorX *= smoothFactor
     this.#errorY *= smoothFactor
@@ -257,14 +412,23 @@ export class NetWorld {
     for (let i = this.#explosions.length - 1; i >= 0; i -= 1) {
       const ex = this.#explosions[i]
       if (!ex) continue
-      for (const p of ex.particles) {
+      const particles = ex.particles
+      for (let j = 0; j < particles.length; j += 1) {
+        const p = particles[j]
+        if (!p) continue
         p.vx *= drag
         p.vy *= drag
         p.x += p.vx * dt
         p.y += p.vy * dt
       }
       ex.ttl -= dt
-      if (ex.ttl <= 0) this.#explosions.splice(i, 1)
+      if (ex.ttl <= 0) {
+        const last = this.#explosions.pop()
+        if (last && i < this.#explosions.length) {
+          this.#explosions[i] = last
+        }
+        this.#releaseExplosion(ex)
+      }
     }
 
     for (let i = this.#predictedBullets.length - 1; i >= 0; i -= 1) {
@@ -276,7 +440,13 @@ export class NetWorld {
       b.y += b.vy * dt
       wrapPosition(b, WORLD_WIDTH, WORLD_HEIGHT)
       b.ttl -= dt
-      if (b.ttl <= 0) this.#predictedBullets.splice(i, 1)
+      if (b.ttl <= 0) {
+        const last = this.#predictedBullets.pop()
+        if (last && i < this.#predictedBullets.length) {
+          this.#predictedBullets[i] = last
+        }
+        this.#predictedBulletPool.release(b)
+      }
     }
 
     if (this.myShipId === null) return null
@@ -291,7 +461,11 @@ export class NetWorld {
     }
 
     if (this.#localShip) {
-      this.#prevLocalShip = cloneShipState(this.#localShip)
+      if (this.#prevLocalShip) {
+        copyShipState(this.#prevLocalShip, this.#localShip)
+      } else {
+        this.#prevLocalShip = cloneShipState(this.#localShip)
+      }
 
       if (this.predictionEnabled && this.#localShip.alive) {
         this.#pendingInputs.push(input)
@@ -318,20 +492,74 @@ export class NetWorld {
     return input
   }
 
+  /**
+   * Zero-allocation декодування бінарного снапшота безпосередньо в перевикористовуваний слот буфера.
+   */
+  onBinarySnapshot(raw: ArrayBuffer, receivedAt = performance.now()): void {
+    const slot = this.#acquireSnapshotSlot()
+    let decoded: Snapshot
+    try {
+      decoded = decodeSnapshotBinaryInto(raw, slot.decodeBuf)
+    } catch (err: unknown) {
+      this.#snapshotPool.push(slot)
+      throw err
+    }
+
+    if (decoded.tick < this.#latestServerTick) {
+      this.#snapshotPool.push(slot)
+      return
+    }
+
+    slot.receivedAt = receivedAt
+    slot.snapshot = decoded
+    this.#ingestSnapshotSlot(slot)
+  }
+
   onSnapshot(snapshot: Snapshot, receivedAt = performance.now()): void {
     if (snapshot.tick < this.#latestServerTick) return
+    const slot = this.#acquireSnapshotSlot()
+    slot.receivedAt = receivedAt
+    slot.snapshot = snapshot
+    this.#ingestSnapshotSlot(slot)
+  }
+
+  #acquireSnapshotSlot(): BufferedSnapshotSlot {
+    const free = this.#snapshotPool.pop()
+    if (free) return free
+    const oldest = this.#snapshotBuffer.shift()
+    if (oldest) {
+      oldest.byId.clear()
+      return oldest
+    }
+    const decodeBuf = createReusableSnapshotBuffer()
+    return {
+      receivedAt: 0,
+      snapshot: decodeBuf,
+      decodeBuf,
+      byId: new Map(),
+    }
+  }
+
+  #ingestSnapshotSlot(slot: BufferedSnapshotSlot): void {
+    const { snapshot, receivedAt, byId } = slot
 
     this.#latestServerTick = snapshot.tick
     this.#lastSnapshotAt = receivedAt
 
-    const byId = new Map<EntityId, SnapshotEntity>()
-    for (const e of snapshot.entities) {
-      byId.set(e.id, e)
+    byId.clear()
+    const entities = snapshot.entities
+    for (let i = 0; i < entities.length; i += 1) {
+      const e = entities[i]
+      if (e) byId.set(e.id, e)
     }
 
-    this.#snapshotBuffer.push({ receivedAt, snapshot, byId })
-    while (this.#snapshotBuffer.length > 24) {
-      this.#snapshotBuffer.shift()
+    this.#snapshotBuffer.push(slot)
+    while (this.#snapshotBuffer.length > SNAPSHOT_BUFFER_CAPACITY) {
+      const recycled = this.#snapshotBuffer.shift()
+      if (recycled) {
+        recycled.byId.clear()
+        this.#snapshotPool.push(recycled)
+      }
     }
 
     if (this.myShipId === null) return
@@ -339,13 +567,24 @@ export class NetWorld {
     for (let i = this.#predictedBullets.length - 1; i >= 0; i -= 1) {
       const pb = this.#predictedBullets[i]
       if (!pb) continue
-      const matched = snapshot.entities.some((e) => {
-        if (e.kind !== 'bullet' || e.ownerId !== this.myShipId) return false
+      let matched = false
+      for (let j = 0; j < entities.length; j += 1) {
+        const e = entities[j]
+        if (!e || e.kind !== 'bullet' || e.ownerId !== this.myShipId) continue
         const dx = wrapDelta(e.x - pb.x, WORLD_WIDTH)
         const dy = wrapDelta(e.y - pb.y, WORLD_HEIGHT)
-        return dx * dx + dy * dy <= 95 * 95
-      })
-      if (matched) this.#predictedBullets.splice(i, 1)
+        if (dx * dx + dy * dy <= 95 * 95) {
+          matched = true
+          break
+        }
+      }
+      if (matched) {
+        const last = this.#predictedBullets.pop()
+        if (last && i < this.#predictedBullets.length) {
+          this.#predictedBullets[i] = last
+        }
+        this.#predictedBulletPool.release(pb)
+      }
     }
 
     const serverEntity = byId.get(this.myShipId)
@@ -393,13 +632,16 @@ export class NetWorld {
       this.#errorY = 0
       this.#errorAngle = 0
       this.#lastCorrectionPx = 0
-      this.#prevLocalShip = cloneShipState(this.#localShip)
+      if (this.#prevLocalShip) {
+        copyShipState(this.#prevLocalShip, this.#localShip)
+      }
       return
     }
 
     if (this.predictionEnabled) {
-      for (const inp of this.#pendingInputs) {
-        this.#integrateWithOptionalBug(this.#localShip, inp, TICK_DT)
+      for (let i = 0; i < this.#pendingInputs.length; i += 1) {
+        const inp = this.#pendingInputs[i]
+        if (inp) this.#integrateWithOptionalBug(this.#localShip, inp, TICK_DT)
       }
 
       const dx = wrapDelta(prevVisX - this.#localShip.x, WORLD_WIDTH)
@@ -427,11 +669,15 @@ export class NetWorld {
       this.#errorAngle = 0
     }
 
-    this.#prevLocalShip = cloneShipState(this.#localShip)
+    if (this.#prevLocalShip) {
+      copyShipState(this.#prevLocalShip, this.#localShip)
+    }
   }
 
   onServerEvents(events: readonly MatchEvent[]): void {
-    for (const evt of events) {
+    for (let i = 0; i < events.length; i += 1) {
+      const evt = events[i]
+      if (!evt) continue
       switch (evt.type) {
         case 'fired':
           this.events.emit('fired', {
@@ -468,7 +714,128 @@ export class NetWorld {
   }
 
   getRenderState(now: number, alpha: number): RenderState {
-    const entities: RenderEntity[] = []
+    const entities = this.#renderEntities
+    entities.length = 0
+    let shipIdx = 0
+    let bulletIdx = 0
+    let astIdx = 0
+    let pickupIdx = 0
+
+    const pushShip = (
+      id: EntityId,
+      isLocal: boolean,
+      name: string,
+      x: number,
+      y: number,
+      angle: number,
+      thrusting: boolean,
+      shieldActive: boolean,
+      rapidFireActive: boolean,
+      hp: number,
+      score: number,
+    ): void => {
+      let slot = this.#renderShips[shipIdx]
+      if (!slot) {
+        slot = {
+          kind: 'ship',
+          id,
+          isLocal,
+          name,
+          x,
+          y,
+          angle,
+          radius: 14,
+          thrusting,
+          shieldActive,
+          rapidFireActive,
+          hp,
+          score,
+        }
+        this.#renderShips.push(slot)
+      }
+      shipIdx += 1
+      slot.id = id
+      slot.isLocal = isLocal
+      slot.name = name
+      slot.x = x
+      slot.y = y
+      slot.angle = angle
+      slot.thrusting = thrusting
+      slot.shieldActive = shieldActive
+      slot.rapidFireActive = rapidFireActive
+      slot.hp = hp
+      slot.score = score
+      entities.push(slot)
+    }
+
+    const pushBullet = (
+      id: EntityId | string,
+      x: number,
+      y: number,
+      angle: number,
+      isHoming: boolean,
+      predicted: boolean,
+    ): void => {
+      let slot = this.#renderBullets[bulletIdx]
+      if (!slot) {
+        slot = { kind: 'bullet', id, x, y, angle, isHoming, predicted }
+        this.#renderBullets.push(slot)
+      }
+      bulletIdx += 1
+      slot.id = id
+      slot.x = x
+      slot.y = y
+      slot.angle = angle
+      slot.isHoming = isHoming
+      slot.predicted = predicted
+      entities.push(slot)
+    }
+
+    const pushAsteroid = (
+      id: EntityId,
+      x: number,
+      y: number,
+      angle: number,
+      isHoming: boolean,
+      radius: number,
+    ): void => {
+      let slot = this.#renderAsteroids[astIdx]
+      if (!slot) {
+        slot = { kind: 'asteroid', id, x, y, angle, isHoming, radius }
+        this.#renderAsteroids.push(slot)
+      }
+      astIdx += 1
+      slot.id = id
+      slot.x = x
+      slot.y = y
+      slot.angle = angle
+      slot.isHoming = isHoming
+      slot.radius = radius
+      entities.push(slot)
+    }
+
+    const pushPickup = (
+      id: EntityId,
+      x: number,
+      y: number,
+      angle: number,
+      effect: PickupEffect,
+      radius: number,
+    ): void => {
+      let slot = this.#renderPickups[pickupIdx]
+      if (!slot) {
+        slot = { kind: 'pickup', id, x, y, angle, effect, radius }
+        this.#renderPickups.push(slot)
+      }
+      pickupIdx += 1
+      slot.id = id
+      slot.x = x
+      slot.y = y
+      slot.angle = angle
+      slot.effect = effect
+      slot.radius = radius
+      entities.push(slot)
+    }
 
     if (
       this.predictionEnabled &&
@@ -499,21 +866,19 @@ export class NetWorld {
         (((baseY + this.#errorY) % WORLD_HEIGHT) + WORLD_HEIGHT) % WORLD_HEIGHT
       const angle = normalizeAngle(baseAngle + this.#errorAngle)
 
-      entities.push({
-        id: this.#localShip.id,
-        kind: 'ship',
-        isLocal: true,
-        name: this.getPlayerName(this.#localShip.id),
+      pushShip(
+        this.#localShip.id,
+        true,
+        this.getPlayerName(this.#localShip.id),
         x,
         y,
         angle,
-        radius: 14,
-        thrusting: this.#localShip.thrust > 0,
-        shieldActive: this.#localShip.shieldTimer > 0,
-        rapidFireActive: this.#localShip.rapidFireTimer > 0,
-        hp: this.#localShip.hp,
-        score: this.#localShip.score,
-      })
+        this.#localShip.thrust > 0,
+        this.#localShip.shieldTimer > 0,
+        this.#localShip.rapidFireTimer > 0,
+        this.#localShip.hp,
+        this.#localShip.score,
+      )
     }
 
     const buf = this.#snapshotBuffer
@@ -553,7 +918,10 @@ export class NetWorld {
           ? Math.max(0, Math.min(1, (renderTime - s0.receivedAt) / span))
           : 1
 
-      for (const e1 of s1.snapshot.entities) {
+      const snapEntities = s1.snapshot.entities
+      for (let i = 0; i < snapEntities.length; i += 1) {
+        const e1 = snapEntities[i]
+        if (!e1) continue
         const e0 = s0.byId.get(e1.id)
         let x = e1.x
         let y = e1.y
@@ -573,53 +941,28 @@ export class NetWorld {
           case 'ship':
             if (this.predictionEnabled && e1.id === this.myShipId) continue
             if (!e1.alive) continue
-            entities.push({
-              kind: 'ship',
-              id: e1.id,
-              isLocal: e1.id === this.myShipId,
-              name: this.getPlayerName(e1.id),
+            pushShip(
+              e1.id,
+              e1.id === this.myShipId,
+              this.getPlayerName(e1.id),
               x,
               y,
               angle,
-              radius: 14,
-              thrusting: e1.thrusting,
-              shieldActive: e1.shieldActive,
-              rapidFireActive: e1.rapidFireActive,
-              hp: e1.hp,
-              score: e1.score,
-            })
+              e1.thrusting,
+              e1.shieldActive,
+              e1.rapidFireActive,
+              e1.hp,
+              e1.score,
+            )
             break
           case 'bullet':
-            entities.push({
-              kind: 'bullet',
-              id: e1.id,
-              x,
-              y,
-              angle,
-              isHoming: e1.isHoming,
-            })
+            pushBullet(e1.id, x, y, angle, e1.isHoming, false)
             break
           case 'asteroid':
-            entities.push({
-              kind: 'asteroid',
-              id: e1.id,
-              x,
-              y,
-              angle,
-              isHoming: e1.isHoming,
-              radius: e1.radius,
-            })
+            pushAsteroid(e1.id, x, y, angle, e1.isHoming, e1.radius)
             break
           case 'pickup':
-            entities.push({
-              kind: 'pickup',
-              id: e1.id,
-              x,
-              y,
-              angle,
-              effect: e1.effect,
-              radius: e1.radius,
-            })
+            pushPickup(e1.id, x, y, angle, e1.effect, e1.radius)
             break
           default:
             assertNever(e1)
@@ -627,24 +970,22 @@ export class NetWorld {
       }
     }
 
-    for (const pb of this.#predictedBullets) {
+    for (let i = 0; i < this.#predictedBullets.length; i += 1) {
+      const pb = this.#predictedBullets[i]
+      if (!pb) continue
       const wx = Math.abs(pb.x - pb.prevX) > WORLD_WIDTH / 2
       const wy = Math.abs(pb.y - pb.prevY) > WORLD_HEIGHT / 2
-      entities.push({
-        id: pb.tempId,
-        kind: 'bullet',
-        x: wx ? pb.x : lerp(pb.prevX, pb.x, alpha),
-        y: wy ? pb.y : lerp(pb.prevY, pb.y, alpha),
-        angle: pb.angle,
-        isHoming: pb.isHoming,
-        predicted: true,
-      })
+      pushBullet(
+        pb.tempId,
+        wx ? pb.x : lerp(pb.prevX, pb.x, alpha),
+        wy ? pb.y : lerp(pb.prevY, pb.y, alpha),
+        pb.angle,
+        pb.isHoming,
+        true,
+      )
     }
 
-    return {
-      entities,
-      explosions: this.#explosions,
-    }
+    return this.#renderState
   }
 
   #integrateWithOptionalBug(
@@ -680,19 +1021,19 @@ export class NetWorld {
     const speed = isHoming ? 340 : 540
     const x = ship.x + cos * (ship.radius + 6)
     const y = ship.y + sin * (ship.radius + 6)
-    this.#predictedBullets.push({
-      tempId: `pred-${this.#nextTempBulletId++}`,
-      x,
-      y,
-      prevX: x,
-      prevY: y,
-      vx: ship.vx + cos * speed,
-      vy: ship.vy + sin * speed,
-      angle: ship.angle,
-      radius: BULLET_RADIUS,
-      isHoming,
-      ttl: 0.28,
-    })
+    const pb = this.#predictedBulletPool.acquire()
+    pb.tempId = `pred-${this.#nextTempBulletId++}`
+    pb.x = x
+    pb.y = y
+    pb.prevX = x
+    pb.prevY = y
+    pb.vx = ship.vx + cos * speed
+    pb.vy = ship.vy + sin * speed
+    pb.angle = ship.angle
+    pb.radius = BULLET_RADIUS
+    pb.isHoming = isHoming
+    pb.ttl = 0.28
+    this.#predictedBullets.push(pb)
   }
 
   #spawnExplosion({
@@ -708,23 +1049,33 @@ export class NetWorld {
   }): void {
     const count = big ? 20 : 10
     const speed = big ? 220 : 150
-    const particles: ExplosionParticle[] = []
+    const ex = this.#explosionPool.acquire()
+    ex.ttl = 0.5
+    ex.maxTtl = 0.5
+    ex.color = color
+    ex.particles.length = 0
+
     for (let i = 0; i < count; i += 1) {
       const a = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.4
       const spd = speed * (0.35 + Math.random() * 0.75)
-      particles.push({
-        x,
-        y,
-        vx: Math.cos(a) * spd,
-        vy: Math.sin(a) * spd,
-        r: 1.5 + Math.random() * 2.5,
-      })
+      const p = this.#particlePool.acquire()
+      p.x = x
+      p.y = y
+      p.vx = Math.cos(a) * spd
+      p.vy = Math.sin(a) * spd
+      p.r = 1.5 + Math.random() * 2.5
+      ex.particles.push(p)
     }
-    this.#explosions.push({
-      ttl: 0.5,
-      maxTtl: 0.5,
-      color,
-      particles,
-    })
+    this.#explosions.push(ex)
+  }
+
+  #releaseExplosion(ex: RenderExplosion): void {
+    for (let i = 0; i < ex.particles.length; i += 1) {
+      const p = ex.particles[i]
+      if (p) this.#particlePool.release(p)
+    }
+    this.#explosionPool.release(ex)
   }
 }
+
+export { asEntityId }

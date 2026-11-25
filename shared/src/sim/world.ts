@@ -1,3 +1,4 @@
+import { ObjectPool } from '../pool.ts'
 import { createPrng, type Prng } from '../prng.ts'
 import {
   asEntityId,
@@ -20,6 +21,7 @@ import {
   RAPID_FIRE_COOLDOWN,
   RESPAWN_DELAY,
   SHIP_MAX_HP,
+  SHIP_RADIUS,
   WORLD_HEIGHT,
   WORLD_WIDTH,
 } from './constants.ts'
@@ -33,8 +35,13 @@ import {
   type MovingBounded,
   type ShipState,
 } from './physics.ts'
+import { SpatialHashGrid } from './spatialHash.ts'
 
 const MAX_PICKUPS = 2
+const MAX_ASTEROID_RADIUS = 28
+const SPATIAL_CELL_SIZE = 64
+
+export type CollisionMode = 'spatial' | 'naive'
 
 interface BulletInternal {
   id: EntityId
@@ -78,6 +85,13 @@ export interface MatchWorldOptions {
   height?: number
   targetAsteroids?: number
   homingEvery?: number
+  collisionMode?: CollisionMode
+}
+
+export interface WorldPoolStats {
+  readonly bulletsCreated: number
+  readonly bulletsReused: number
+  readonly bulletsAvailable: number
 }
 
 const IDLE_INPUT: Pick<
@@ -98,10 +112,39 @@ export class MatchWorld {
   #asteroids = new Map<EntityId, AsteroidInternal>()
   #pickups = new Map<EntityId, PickupInternal>()
 
+  #bulletPool = new ObjectPool<BulletInternal>(
+    () => ({
+      id: asEntityId(0),
+      kind: 'bullet',
+      ownerId: asEntityId(0),
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      angle: 0,
+      radius: BULLET_RADIUS,
+      ttl: 0,
+      damage: 25,
+      isHoming: false,
+    }),
+    { initialSize: 64, maxSize: 1024 },
+  )
+
+  #shipGrid: SpatialHashGrid<ShipState>
+  #asteroidGrid: SpatialHashGrid<AsteroidInternal>
+  #pickupGrid: SpatialHashGrid<PickupInternal>
+  #bulletScratch: BulletInternal[] = []
+  #asteroidScratch: AsteroidInternal[] = []
+  #shipQuery: ShipState[] = []
+  #asteroidQuery: AsteroidInternal[] = []
+  #pickupQuery: PickupInternal[] = []
+  #asteroidIndex = new Int32Array(65536)
+
   readonly width: number
   readonly height: number
   readonly targetAsteroids: number
   readonly homingEvery: number
+  readonly collisionMode: CollisionMode
 
   tick = 0
   elapsedMs = 0
@@ -114,12 +157,29 @@ export class MatchWorld {
     height = WORLD_HEIGHT,
     targetAsteroids = 6,
     homingEvery = 4,
+    collisionMode = 'spatial',
   }: MatchWorldOptions = {}) {
     this.width = width
     this.height = height
     this.targetAsteroids = targetAsteroids
     this.homingEvery = homingEvery
+    this.collisionMode = collisionMode
     this.#prng = createPrng(seed)
+    this.#shipGrid = new SpatialHashGrid<ShipState>(
+      width,
+      height,
+      SPATIAL_CELL_SIZE,
+    )
+    this.#asteroidGrid = new SpatialHashGrid<AsteroidInternal>(
+      width,
+      height,
+      SPATIAL_CELL_SIZE,
+    )
+    this.#pickupGrid = new SpatialHashGrid<PickupInternal>(
+      width,
+      height,
+      SPATIAL_CELL_SIZE,
+    )
 
     for (let i = 0; i < this.targetAsteroids; i += 1) {
       this.#spawnAsteroid({ homing: i === 0 })
@@ -128,6 +188,14 @@ export class MatchWorld {
 
   get currentTick(): Tick {
     return asTick(this.tick)
+  }
+
+  getPoolStats(): WorldPoolStats {
+    return {
+      bulletsCreated: this.#bulletPool.created,
+      bulletsReused: this.#bulletPool.reused,
+      bulletsAvailable: this.#bulletPool.available,
+    }
   }
 
   #allocId(): EntityId {
@@ -210,7 +278,10 @@ export class MatchWorld {
       bullet.y += bullet.vy * dt
       wrapPosition(bullet, this.width, this.height)
       bullet.ttl -= dt
-      if (bullet.ttl <= 0) this.#bullets.delete(id)
+      if (bullet.ttl <= 0) {
+        this.#bullets.delete(id)
+        this.#bulletPool.release(bullet)
+      }
     }
 
     for (const asteroid of this.#asteroids.values()) {
@@ -322,20 +393,18 @@ export class MatchWorld {
     const bulletSpeed = homing ? 340 : 540
     const id = this.#allocId()
 
-    const bullet: BulletInternal = {
-      id,
-      kind: 'bullet',
-      ownerId: ship.id,
-      x: ship.x + cos * (ship.radius + 6),
-      y: ship.y + sin * (ship.radius + 6),
-      vx: ship.vx + cos * bulletSpeed,
-      vy: ship.vy + sin * bulletSpeed,
-      angle: ship.angle,
-      radius: BULLET_RADIUS,
-      ttl: homing ? 2.5 : 1.4,
-      damage: homing ? 45 : 25,
-      isHoming: homing,
-    }
+    const bullet = this.#bulletPool.acquire()
+    bullet.id = id
+    bullet.ownerId = ship.id
+    bullet.x = ship.x + cos * (ship.radius + 6)
+    bullet.y = ship.y + sin * (ship.radius + 6)
+    bullet.vx = ship.vx + cos * bulletSpeed
+    bullet.vy = ship.vy + sin * bulletSpeed
+    bullet.angle = ship.angle
+    bullet.radius = BULLET_RADIUS
+    bullet.ttl = homing ? 2.5 : 1.4
+    bullet.damage = homing ? 45 : 25
+    bullet.isHoming = homing
 
     wrapPosition(bullet, this.width, this.height)
     this.#bullets.set(id, bullet)
@@ -406,16 +475,49 @@ export class MatchWorld {
   }
 
   #resolveCollisions(events: MatchEvent[]): void {
-    for (const [bulletId, bullet] of [...this.#bullets]) {
+    if (this.collisionMode === 'naive') {
+      this.#resolveCollisionsNaive(events)
+    } else {
+      this.#resolveCollisionsSpatial(events)
+    }
+  }
+
+  #resolveCollisionsSpatial(events: MatchEvent[]): void {
+    this.#shipGrid.clear()
+    for (const ship of this.#ships.values()) {
+      if (ship.alive) this.#shipGrid.insert(ship)
+    }
+
+    this.#asteroidGrid.clear()
+    for (const asteroid of this.#asteroids.values()) {
+      this.#asteroidGrid.insert(asteroid)
+    }
+
+    this.#bulletScratch.length = 0
+    for (const bullet of this.#bullets.values()) {
+      this.#bulletScratch.push(bullet)
+    }
+
+    for (let i = 0; i < this.#bulletScratch.length; i += 1) {
+      const bullet = this.#bulletScratch[i]
+      if (!bullet) continue
       let consumed = false
 
-      for (const ship of this.#ships.values()) {
-        if (!ship.alive || ship.id === bullet.ownerId) continue
+      this.#shipGrid.queryCircle(
+        bullet.x,
+        bullet.y,
+        bullet.radius + SHIP_RADIUS,
+        this.#shipQuery,
+      )
+      for (let j = 0; j < this.#shipQuery.length; j += 1) {
+        const ship = this.#shipQuery[j]
+        if (!ship || !ship.alive || ship.id === bullet.ownerId) continue
         const dx = ship.x - bullet.x
         const dy = ship.y - bullet.y
         const r = ship.radius + bullet.radius
         if (dx * dx + dy * dy <= r * r) {
-          this.#bullets.delete(bulletId)
+          this.#bullets.delete(bullet.id)
+          this.#bulletPool.release(bullet)
           consumed = true
           this.#damageShip(ship, bullet.damage, bullet.ownerId, events)
           break
@@ -423,16 +525,25 @@ export class MatchWorld {
       }
       if (consumed) continue
 
-      for (const [astId, asteroid] of [...this.#asteroids]) {
+      this.#asteroidGrid.queryCircle(
+        bullet.x,
+        bullet.y,
+        bullet.radius + MAX_ASTEROID_RADIUS,
+        this.#asteroidQuery,
+      )
+      for (let j = 0; j < this.#asteroidQuery.length; j += 1) {
+        const asteroid = this.#asteroidQuery[j]
+        if (!asteroid || !this.#asteroids.has(asteroid.id)) continue
         const dx = asteroid.x - bullet.x
         const dy = asteroid.y - bullet.y
         const r = asteroid.radius + bullet.radius
         if (dx * dx + dy * dy <= r * r) {
-          this.#bullets.delete(bulletId)
+          this.#bullets.delete(bullet.id)
+          this.#bulletPool.release(bullet)
           asteroid.hp -= bullet.damage
           events.push({ type: 'hit', x: asteroid.x, y: asteroid.y })
           if (asteroid.hp <= 0) {
-            this.#asteroids.delete(astId)
+            this.#asteroids.delete(asteroid.id)
             const owner = this.#ships.get(bullet.ownerId)
             if (owner) {
               owner.score = Math.min(65535, owner.score + asteroid.points)
@@ -444,7 +555,158 @@ export class MatchWorld {
               x: asteroid.x,
               y: asteroid.y,
             })
-            this.#splitOrDrop(asteroid)
+            this.#splitOrDrop(asteroid, true)
+          }
+          break
+        }
+      }
+    }
+
+    this.#asteroidGrid.clear()
+    for (const asteroid of this.#asteroids.values()) {
+      this.#asteroidGrid.insert(asteroid)
+    }
+
+    this.#pickupGrid.clear()
+    for (const pickup of this.#pickups.values()) {
+      this.#pickupGrid.insert(pickup)
+    }
+
+    for (const ship of this.#ships.values()) {
+      if (!ship.alive) continue
+
+      this.#asteroidGrid.queryCircle(
+        ship.x,
+        ship.y,
+        ship.radius + MAX_ASTEROID_RADIUS,
+        this.#asteroidQuery,
+      )
+      for (let j = 0; j < this.#asteroidQuery.length; j += 1) {
+        const asteroid = this.#asteroidQuery[j]
+        if (!asteroid) continue
+        const dx = asteroid.x - ship.x
+        const dy = asteroid.y - ship.y
+        const r = ship.radius + asteroid.radius
+        if (dx * dx + dy * dy <= r * r) {
+          this.#bouncePair(ship, asteroid)
+          this.#damageShip(ship, 35, null, events)
+        }
+      }
+
+      this.#pickupGrid.queryCircle(
+        ship.x,
+        ship.y,
+        ship.radius + PICKUP_RADIUS,
+        this.#pickupQuery,
+      )
+      for (let j = 0; j < this.#pickupQuery.length; j += 1) {
+        const pickup = this.#pickupQuery[j]
+        if (!pickup || !this.#pickups.has(pickup.id)) continue
+        const dx = pickup.x - ship.x
+        const dy = pickup.y - ship.y
+        const r = ship.radius + pickup.radius
+        if (dx * dx + dy * dy <= r * r) {
+          this.#pickups.delete(pickup.id)
+          if (pickup.effect === 'shield') ship.shieldTimer = 6
+          else ship.rapidFireTimer = 6
+          events.push({
+            type: 'pickup',
+            shipId: ship.id,
+            effect: pickup.effect,
+          })
+        }
+      }
+    }
+
+    this.#asteroidScratch.length = 0
+    this.#asteroidGrid.clear()
+    let idx = 0
+    for (const asteroid of this.#asteroids.values()) {
+      this.#asteroidScratch.push(asteroid)
+      this.#asteroidIndex[asteroid.id & 0xffff] = idx
+      idx += 1
+      this.#asteroidGrid.insert(asteroid)
+    }
+
+    for (let i = 0; i < this.#asteroidScratch.length; i += 1) {
+      const a = this.#asteroidScratch[i]
+      if (!a) continue
+      this.#asteroidGrid.queryCircle(
+        a.x,
+        a.y,
+        a.radius + MAX_ASTEROID_RADIUS + 4,
+        this.#asteroidQuery,
+      )
+      for (let k = 0; k < this.#asteroidQuery.length; k += 1) {
+        const b = this.#asteroidQuery[k]
+        if (!b) continue
+        const j = this.#asteroidIndex[b.id & 0xffff] ?? -1
+        if (j <= i) continue
+        const dx = b.x - a.x
+        const dy = b.y - a.y
+        const r = a.radius + b.radius
+        if (dx * dx + dy * dy <= r * r) {
+          this.#bouncePair(a, b)
+        }
+      }
+    }
+  }
+
+  #resolveCollisionsNaive(events: MatchEvent[]): void {
+    this.#bulletScratch.length = 0
+    for (const bullet of this.#bullets.values()) {
+      this.#bulletScratch.push(bullet)
+    }
+
+    for (let bi = 0; bi < this.#bulletScratch.length; bi += 1) {
+      const bullet = this.#bulletScratch[bi]
+      if (!bullet) continue
+      let consumed = false
+
+      for (const ship of this.#ships.values()) {
+        if (!ship.alive || ship.id === bullet.ownerId) continue
+        const dx = ship.x - bullet.x
+        const dy = ship.y - bullet.y
+        const r = ship.radius + bullet.radius
+        if (dx * dx + dy * dy <= r * r) {
+          this.#bullets.delete(bullet.id)
+          this.#bulletPool.release(bullet)
+          consumed = true
+          this.#damageShip(ship, bullet.damage, bullet.ownerId, events)
+          break
+        }
+      }
+      if (consumed) continue
+
+      this.#asteroidScratch.length = 0
+      for (const asteroid of this.#asteroids.values()) {
+        this.#asteroidScratch.push(asteroid)
+      }
+      for (let ai = 0; ai < this.#asteroidScratch.length; ai += 1) {
+        const asteroid = this.#asteroidScratch[ai]
+        if (!asteroid) continue
+        const dx = asteroid.x - bullet.x
+        const dy = asteroid.y - bullet.y
+        const r = asteroid.radius + bullet.radius
+        if (dx * dx + dy * dy <= r * r) {
+          this.#bullets.delete(bullet.id)
+          this.#bulletPool.release(bullet)
+          asteroid.hp -= bullet.damage
+          events.push({ type: 'hit', x: asteroid.x, y: asteroid.y })
+          if (asteroid.hp <= 0) {
+            this.#asteroids.delete(asteroid.id)
+            const owner = this.#ships.get(bullet.ownerId)
+            if (owner) {
+              owner.score = Math.min(65535, owner.score + asteroid.points)
+            }
+            events.push({
+              type: 'exploded',
+              kind: 'asteroid',
+              big: asteroid.radius >= 26,
+              x: asteroid.x,
+              y: asteroid.y,
+            })
+            this.#splitOrDrop(asteroid, false)
           }
           break
         }
@@ -464,7 +726,7 @@ export class MatchWorld {
         }
       }
 
-      for (const [pId, pickup] of [...this.#pickups]) {
+      for (const [pId, pickup] of this.#pickups) {
         const dx = pickup.x - ship.x
         const dy = pickup.y - ship.y
         const r = ship.radius + pickup.radius
@@ -481,12 +743,15 @@ export class MatchWorld {
       }
     }
 
-    const astList = [...this.#asteroids.values()]
-    for (let i = 0; i < astList.length; i += 1) {
-      const a = astList[i]
+    this.#asteroidScratch.length = 0
+    for (const asteroid of this.#asteroids.values()) {
+      this.#asteroidScratch.push(asteroid)
+    }
+    for (let i = 0; i < this.#asteroidScratch.length; i += 1) {
+      const a = this.#asteroidScratch[i]
       if (!a) continue
-      for (let j = i + 1; j < astList.length; j += 1) {
-        const b = astList[j]
+      for (let j = i + 1; j < this.#asteroidScratch.length; j += 1) {
+        const b = this.#asteroidScratch[j]
         if (!b) continue
         const dx = b.x - a.x
         const dy = b.y - a.y
@@ -526,13 +791,13 @@ export class MatchWorld {
     }
   }
 
-  #splitOrDrop(asteroid: AsteroidInternal): void {
+  #splitOrDrop(asteroid: AsteroidInternal, insertIntoGrid: boolean): void {
     if (asteroid.radius >= 26) {
       for (let i = 0; i < 2; i += 1) {
         const angle = this.#prng.next() * Math.PI * 2
         const speed = 110 + this.#prng.next() * 60
         const id = this.#allocId()
-        this.#asteroids.set(id, {
+        const child: AsteroidInternal = {
           id,
           kind: 'asteroid',
           x: asteroid.x + Math.cos(angle) * 12,
@@ -545,7 +810,9 @@ export class MatchWorld {
           spin: (this.#prng.next() - 0.5) * 3,
           points: 50,
           isHoming: false,
-        })
+        }
+        this.#asteroids.set(id, child)
+        if (insertIntoGrid) this.#asteroidGrid.insert(child)
       }
     } else if (this.#prng.next() < 0.35 && this.#pickups.size < MAX_PICKUPS) {
       this.#spawnPickupAt(asteroid.x, asteroid.y)
@@ -653,7 +920,8 @@ export class MatchWorld {
   }
 
   #findSafeSpawnSpot(): { x: number; y: number } {
-    let best = { x: this.width / 2, y: this.height / 2 }
+    let bestX = this.width / 2
+    let bestY = this.height / 2
     let bestMinDist = -1
 
     for (let i = 0; i < 12; i += 1) {
@@ -671,9 +939,10 @@ export class MatchWorld {
       }
       if (minDist > bestMinDist) {
         bestMinDist = minDist
-        best = { x: cx, y: cy }
+        bestX = cx
+        bestY = cy
       }
     }
-    return best
+    return { x: bestX, y: bestY }
   }
 }

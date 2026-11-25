@@ -137,6 +137,26 @@ export function cloneShipState(ship: ShipState): ShipState {
   return { ...ship }
 }
 
+export function copyShipState(dst: ShipState, src: ShipState): void {
+  dst.id = src.id
+  dst.x = src.x
+  dst.y = src.y
+  dst.vx = src.vx
+  dst.vy = src.vy
+  dst.angle = src.angle
+  dst.radius = src.radius
+  dst.hp = src.hp
+  dst.maxHp = src.maxHp
+  dst.score = src.score
+  dst.alive = src.alive
+  dst.thrust = src.thrust
+  dst.fireCooldown = src.fireCooldown
+  dst.homingCooldown = src.homingCooldown
+  dst.shieldTimer = src.shieldTimer
+  dst.rapidFireTimer = src.rapidFireTimer
+  dst.respawnTimer = src.respawnTimer
+}
+
 export function wrapPosition(
   entity: Positioned,
   width = WORLD_WIDTH,

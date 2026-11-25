@@ -10,9 +10,13 @@ import {
   asTick,
   assertNever,
   type Codec,
+  type EntityId,
   type InputCommand,
+  type PickupEffect,
+  type Seq,
   type Snapshot,
   type SnapshotEntity,
+  type Tick,
 } from '../types.ts'
 
 /**
@@ -288,6 +292,287 @@ export function decodeSnapshotBinary(raw: unknown): Snapshot {
   }
 
   return { tick, lastProcessedSeq, matchTimeMs, entities }
+}
+
+interface MutableShipSlot {
+  id: EntityId
+  kind: 'ship'
+  x: number
+  y: number
+  vx: number
+  vy: number
+  angle: number
+  thrusting: boolean
+  shieldActive: boolean
+  rapidFireActive: boolean
+  alive: boolean
+  hp: number
+  score: number
+}
+
+interface MutableBulletSlot {
+  id: EntityId
+  kind: 'bullet'
+  x: number
+  y: number
+  vx: number
+  vy: number
+  angle: number
+  isHoming: boolean
+  ownerId: EntityId
+}
+
+interface MutableAsteroidSlot {
+  id: EntityId
+  kind: 'asteroid'
+  x: number
+  y: number
+  vx: number
+  vy: number
+  angle: number
+  isHoming: boolean
+  radius: number
+  hp: number
+}
+
+interface MutablePickupSlot {
+  id: EntityId
+  kind: 'pickup'
+  x: number
+  y: number
+  vx: number
+  vy: number
+  angle: number
+  effect: PickupEffect
+  radius: number
+}
+
+/**
+ * Перевикористовуваний буфер декодування бінарного снапшота (zero-allocation у steady-state).
+ * Прибирає основне джерело GC-тиску на клієнті, виявлене Chrome Allocation Profiler.
+ */
+export interface ReusableSnapshotBuffer {
+  tick: Tick
+  lastProcessedSeq: Seq
+  matchTimeMs: number
+  readonly entities: SnapshotEntity[]
+  readonly ships: MutableShipSlot[]
+  readonly bullets: MutableBulletSlot[]
+  readonly asteroids: MutableAsteroidSlot[]
+  readonly pickups: MutablePickupSlot[]
+}
+
+export function createReusableSnapshotBuffer(): ReusableSnapshotBuffer {
+  return {
+    tick: asTick(0),
+    lastProcessedSeq: asSeq(0),
+    matchTimeMs: 0,
+    entities: [],
+    ships: [],
+    bullets: [],
+    asteroids: [],
+    pickups: [],
+  }
+}
+
+export function decodeSnapshotBinaryInto(
+  raw: unknown,
+  out: ReusableSnapshotBuffer,
+): Snapshot {
+  const view = toDataView(raw)
+  if (view.byteLength < SNAPSHOT_HEADER_BYTES) {
+    throw new RangeError('Binary snapshot shorter than header')
+  }
+
+  const msgType = view.getUint8(0)
+  const version = view.getUint8(1)
+  if (msgType !== BIN_MSG_SNAPSHOT) {
+    throw new RangeError(`Unexpected binary snapshot type: ${msgType}`)
+  }
+  if (version !== PROTOCOL_VERSION) {
+    throw new RangeError(`Unsupported binary protocol version: ${version}`)
+  }
+
+  const tick = asTick(view.getUint32(2, LE))
+  const lastProcessedSeq = asSeq(view.getUint32(6, LE))
+  const matchTimeMs = view.getUint32(10, LE)
+  const count = view.getUint16(14, LE)
+
+  const expectedLength = SNAPSHOT_HEADER_BYTES + count * ENTITY_BYTE_STRIDE
+  if (view.byteLength !== expectedLength) {
+    throw new RangeError(
+      `Invalid binary snapshot size: ${view.byteLength} (expected ${expectedLength})`,
+    )
+  }
+
+  out.tick = tick
+  out.lastProcessedSeq = lastProcessedSeq
+  out.matchTimeMs = matchTimeMs
+  out.entities.length = 0
+
+  let shipIdx = 0
+  let bulletIdx = 0
+  let astIdx = 0
+  let pickupIdx = 0
+  let offset = SNAPSHOT_HEADER_BYTES
+
+  for (let i = 0; i < count; i += 1) {
+    const id = asEntityId(view.getUint16(offset, LE))
+    const kindCode = view.getUint8(offset + 2)
+    const kind = KIND_FROM_CODE[kindCode]
+    if (!kind) {
+      throw new RangeError(`Unknown entity kind code: ${kindCode}`)
+    }
+
+    const flags = view.getUint8(offset + 3)
+    const x = view.getFloat32(offset + 4, LE)
+    const y = view.getFloat32(offset + 8, LE)
+    const vx = view.getFloat32(offset + 12, LE)
+    const vy = view.getFloat32(offset + 16, LE)
+    const angle = dequantizeAngle(view.getInt16(offset + 20, LE))
+    const metaA = view.getUint16(offset + 22, LE)
+    const metaB = view.getUint16(offset + 24, LE)
+
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(vx) ||
+      !Number.isFinite(vy)
+    ) {
+      throw new RangeError('Non-finite coordinates in snapshot')
+    }
+
+    switch (kind) {
+      case 'ship': {
+        let slot = out.ships[shipIdx]
+        if (!slot) {
+          slot = {
+            id,
+            kind: 'ship',
+            x,
+            y,
+            vx,
+            vy,
+            angle,
+            thrusting: false,
+            shieldActive: false,
+            rapidFireActive: false,
+            alive: false,
+            hp: 0,
+            score: 0,
+          }
+          out.ships.push(slot)
+        }
+        shipIdx += 1
+        slot.id = id
+        slot.x = x
+        slot.y = y
+        slot.vx = vx
+        slot.vy = vy
+        slot.angle = angle
+        slot.thrusting = (flags & 1) !== 0
+        slot.shieldActive = (flags & 2) !== 0
+        slot.rapidFireActive = (flags & 4) !== 0
+        slot.alive = (flags & 8) !== 0
+        slot.hp = metaA
+        slot.score = metaB
+        out.entities.push(slot)
+        break
+      }
+      case 'bullet': {
+        let slot = out.bullets[bulletIdx]
+        if (!slot) {
+          slot = {
+            id,
+            kind: 'bullet',
+            x,
+            y,
+            vx,
+            vy,
+            angle,
+            isHoming: false,
+            ownerId: asEntityId(0),
+          }
+          out.bullets.push(slot)
+        }
+        bulletIdx += 1
+        slot.id = id
+        slot.x = x
+        slot.y = y
+        slot.vx = vx
+        slot.vy = vy
+        slot.angle = angle
+        slot.isHoming = (flags & 1) !== 0
+        slot.ownerId = asEntityId(metaA)
+        out.entities.push(slot)
+        break
+      }
+      case 'asteroid': {
+        let slot = out.asteroids[astIdx]
+        if (!slot) {
+          slot = {
+            id,
+            kind: 'asteroid',
+            x,
+            y,
+            vx,
+            vy,
+            angle,
+            isHoming: false,
+            radius: 0,
+            hp: 0,
+          }
+          out.asteroids.push(slot)
+        }
+        astIdx += 1
+        slot.id = id
+        slot.x = x
+        slot.y = y
+        slot.vx = vx
+        slot.vy = vy
+        slot.angle = angle
+        slot.isHoming = (flags & 1) !== 0
+        slot.radius = metaA
+        slot.hp = metaB
+        out.entities.push(slot)
+        break
+      }
+      case 'pickup': {
+        let slot = out.pickups[pickupIdx]
+        if (!slot) {
+          slot = {
+            id,
+            kind: 'pickup',
+            x,
+            y,
+            vx,
+            vy,
+            angle,
+            effect: 'shield',
+            radius: 0,
+          }
+          out.pickups.push(slot)
+        }
+        pickupIdx += 1
+        slot.id = id
+        slot.x = x
+        slot.y = y
+        slot.vx = vx
+        slot.vy = vy
+        slot.angle = angle
+        slot.effect = (flags & 1) !== 0 ? 'rapidFire' : 'shield'
+        slot.radius = metaA
+        out.entities.push(slot)
+        break
+      }
+      default:
+        assertNever(kind)
+    }
+
+    offset += ENTITY_BYTE_STRIDE
+  }
+
+  return out
 }
 
 export const binaryCodec: Codec = {
