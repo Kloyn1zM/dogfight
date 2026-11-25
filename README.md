@@ -4,7 +4,54 @@
 
 ![Dogfight two-player real-time multiplayer demo (100ms ±30ms jitter, 2% drop)](docs/dogfight-demo.gif)
 
-Мультиплеєрна 2D-гра в реальному часі (клієнт на Canvas 2D + сервер на Node.js).
+Мультиплеєрна 2D космічна арена в реальному часі (клієнт на Canvas 2D + Web Audio + PWA, авторитетний сервер на Node.js 22 + WebSocket binary protocol, спільна детермінована симуляція на суворому TypeScript).
+
+- **Жива адреса (`https://` + `wss://`):** `<!-- TODO: вставити Render URL після деплою, напр. https://dogfight.onrender.com -->`
+- **Демо-відео (3–5 хв):** `<!-- TODO: вставити посилання на відео після запису -->`
+- **Реальний RTT (дві різні мережі):** `<!-- TODO: вписати заміряний RTT двох гравців із різних мереж -->`
+
+### Як грати
+- **ПК:** `W` / `↑` — тяга, `A` / `D` або `←` / `→` — поворот, `Пробіл` або ЛКМ — постріл, `E` — самонавідна ракета, `M` — звук, `Esc` — повернутися в лобі.
+- **Телефон (PWA):** відкрийте публічне посилання в Chrome/Safari → «Додати на головний екран» / «Встановити додаток». На сенсорних пристроях автоматично з'являються екранні кнопки керування (`◀`, `▲`, `▶`, `FIRE`, `E`).
+
+### Архітектура системи
+
+```mermaid
+flowchart LR
+  subgraph Client["Browser / Mobile PWA (60-144 Hz)"]
+    UI["Lobby, Chat, Netgraph & Touch Controls"]
+    Loop["Fixed-step rAF Loop + Canvas 2D + Web Audio"]
+    NetW["NetWorld (Prediction, Reconciliation, 24-slot Ring Buffer)"]
+    WSClient["GameConnection (Binary DataView + Auto-Reconnect)"]
+  end
+
+  Proxy["Render TLS Reverse Proxy (HTTPS + WSS)"]
+
+  subgraph Server["Single Node.js 22 Process (Docker non-root)"]
+    HTTP["node:http (/health, /ready, /metrics, /api/rooms, static dist)"]
+    WSS["ws Upgrade Guard (Origin 403, Per-IP 429, TokenBucket)"]
+    Rooms["RoomManager + Match (30 Hz) + Shared MatchWorld (SpatialHashGrid)"]
+    Logs["pino JSON stdout + NDJSON MatchLog pipeline"]
+  end
+
+  WSClient <-->|"WSS Binary 12B input / 16+26N snapshot"| Proxy
+  UI <-->|"HTTPS JSON API"| Proxy
+  Proxy <--> HTTP
+  Proxy <--> WSS
+  WSS <--> Rooms
+  Rooms --> Logs
+```
+
+### Ключові зведені метрики (Labs 5, 7, 8)
+- **Бінарний протокол (`DataView`, Lab 5):** **`7.04×` менше трафіку** (`926 B` vs `6516 B` на 35 сутностях) і **`21.5×` швидше** за JSON (`5.63 µs` vs `120.84 µs`).
+- **Тести та якість (Lab 7–8):** **87 автоматизованих тестів** (Vitest + 6 `fast-check` property-тестів + fault-injection тести + Playwright 2-browser E2E), покриття `shared/` **`95.41%` statements / `96.79%` lines**, `0 any`, детермінізм 1000 кроків **`babcfb7b`**.
+- **Оптимізація V8/GC (Lab 7):** пікова JS-робота кадру в Chrome знизилась із `15.5 ms` до **`10.5 ms` (-32%)**, DOM Nodes стабілізувалися (`356–356`), серверний тик на 128 кораблях прискорився на **-45%** (`0.7045 → 0.3886 ms`) завдяки `ObjectPool` + `SpatialHashGrid`.
+- **Місткість одного процесу Node.js:** до **`128` активних гравців** (16 кімнат по 8 гравців) із `0 overruns`, `jitter p99 = 14.81 ms` та `RSS = 130.2 MB`; поріг деградації (`> 33.3 ms`) — **`256` клієнтів**.
+
+### Обмеження архітектури та чому вони лишилися
+1. **Усі гравці однієї кімнати мусять бути в одному процесі Node.js:** авторитетна симуляція `MatchWorld` працює в пам'яті з частотою 30 Hz (бюджет 33.3 мс). Поділ однієї кімнати між кількома серверами вимагав би міжпроцесної синхронізації стану фізики кожні 33 мс, що додало б мережеву затримку й складність консенсусу. Горизонтальне масштабування для такого класу ігор робиться шардингом *по кімнатах* (sticky routing за `roomId`).
+2. **Ефемерна файлова система на Render Free Tier:** локальні NDJSON-реплеї очищуються після перезапуску контейнера; натомість структуровані `pino` JSON-логи стрімляться в `stdout` хостингу, а для постійного зберігання реплеїв знадобилося б об'єктне сховище (S3/R2).
+3. **Cold start на безкоштовному тарифі (~30–60 с після 15 хв простою):** інстанс засинає без трафіку, щоб вкладатися в пул 750 годин/місяць.
 
 ---
 
@@ -447,3 +494,28 @@ Event-loop jitter p99 vs кількість headless WS-клієнтів (бюд
 ```
 
 **Висновок щодо місткості одного процесу Node.js:** до **`128` активних гравців** (16 паралельних кімнат по 8 гравців) сервер працює без жодного overrun із запасом по CPU (`6.63 ms` сумарної роботи з бюджету `33.33 ms`) та RSS `130.2 MB`. Поріг деградації (`> 33.3 ms` затримки event loop і перші overruns) настає на позначці **`256` клієнтів** (32 кімнати, ~7680 вхідних і ~7680 вихідних WS-кадрів/с у межах одного потоку).
+
+---
+
+## Lab 08 — Shipping the Game: Docker, Observability, Release Pipeline, and PWA
+
+### Що реалізовано
+- **Надійний життєвий цикл процесу (`server/src/index.ts`, `server/src/app.ts`):**
+  - За `SIGTERM`/`SIGINT` сервер переводить `/ready` у `503`, перестає приймати нові з'єднання, розсилає підключеним гравцям `{ v: 2, type: 'shutdown', reason }`, закриває сокети кодом **`1001`**, зупиняє матчі, дозаписує NDJSON-логи і завершується з кодом `0` за `< 10 с` (автоматично перевіряється через `docker stop` у GitHub Actions CI).
+  - Необроблені `uncaughtException` та `unhandledRejection` фіксуються через `pino` (`fatal`) і завершують процес із кодом `1` (без глушіння).
+- **Спостережуваність (`server/src/logger.ts`, `server/src/metrics.ts`):**
+  - Структуровані JSON-логи **`pino`** із полями `roomId`, `playerId`, `ip` та автоматичним редагуванням секретів (`authorization`, `cookie`, `password`, `token`, `secret` → `[REDACTED]`).
+  - `GET /health` — повертає `200` і `gitSha` збірки (передається через Docker `ARG GIT_SHA`).
+  - `GET /ready` — повертає `200` поки сервер готовий приймати гравців (`503` під час shutdown або переповнення).
+  - `GET /metrics` — Prometheus text format (та `?format=json`): гравці, кімнати, WS-з'єднання, `messages/s`, `bytes/s`, час тику (`p50/p95/p99`), `performance.eventLoopUtilization()`, `RSS` і `heapUsed`.
+- **Безпека та валідація конфігу (`server/src/config.ts`, `server/src/ws.ts`):**
+  - Zod-конфіг із `ALLOWED_ORIGINS`, `MAX_CONNECTIONS_PER_IP`, `MAX_TOTAL_PLAYERS`, `TRUST_PROXY`, `SHUTDOWN_TIMEOUT_MS` (`≤ 9500 ms`), `GIT_SHA`, `LOG_LEVEL`.
+  - Перевірка `Origin` на WS upgrade (`403 Forbidden`) та ліміт з'єднань з одного IP (`429 Too Many Requests` із підтримкою `X-Forwarded-For` за проксі).
+- **Тести на збої (`server/test/faults.test.ts`, `client/test/connection.test.ts`):**
+  - Обрив клієнта посеред матчу (`socket.terminate()`) → коректне видалення корабля й оновлення `roster` в іншого гравця.
+  - Вбитий сервер / `shutdown` → клієнт автоматично повертається в лобі з повідомленням.
+  - Атака ~1000 битих кадрів/с (битий JSON + биті бінарні буфери) → атакуючого відключає сервер (`1007`/`1008`/`4008`), час тику в іншій кімнаті залишається `< 33.3 ms` (`0 overruns`).
+- **2-етапний `Dockerfile` та реліз за тегом `v*` (`.github/workflows/release.yml`):**
+  - Компіляція `shared/` і `server/` у чистий ESM JS (`dist/`), фінальний образ `node:22-alpine` без `devDependencies` і `tsx`, `USER node` (non-root), `HEALTHCHECK`, запуск напряму `CMD ["node", "server/dist/index.js"]`, розмір **`< 200 MB`** (перевіряється в CI).
+  - При пуші тегу `v*` GitHub Actions збирає образ із `GIT_SHA`, публікує в GHCR (`ghcr.io/kloyn1zm/dogfight`) і тригерить деплой на Render через Deploy Hook із автоматичним `wss://`.
+- **PWA (`manifest.webmanifest`, `sw.js`, PNG-іконки `192×192` і `512×512`, `client/src/ui/touchControls.ts`):** гра встановлюється на телефон як standalone-додаток із сенсорним керуванням.

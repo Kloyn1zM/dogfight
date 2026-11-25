@@ -1,4 +1,5 @@
-import type { Server as HttpServer } from 'node:http'
+import type { IncomingMessage, Server as HttpServer } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import {
   asEntityId,
@@ -9,7 +10,9 @@ import {
   type InputCommand,
 } from '@dogfight/shared'
 import type { ServerConfig } from './config.ts'
+import type { ServerLogger } from './logger.ts'
 import { Match } from './match.ts'
+import type { MetricsCollector } from './metrics.ts'
 import { NetSimulator, type NetSimConfig } from './netSim.ts'
 import {
   encodeMessage,
@@ -17,16 +20,18 @@ import {
   makeError,
   makeEvents,
   makeRoster,
+  makeShutdown,
   makeSystem,
   makeWelcome,
   parseClientMessage,
 } from './protocol.ts'
-import type { Room, RoomManager, RoomPlayer } from './rooms.ts'
 import { TokenBucket } from './rateLimit.ts'
+import type { Room, RoomManager, RoomPlayer } from './rooms.ts'
 
 interface SocketMeta {
   player: RoomPlayer | null
   room: Room | null
+  ip: string
   missedPongs: number
   bucket: TokenBucket
   joinTimer: ReturnType<typeof setTimeout> | null
@@ -37,6 +42,8 @@ export interface WsStats {
   readonly droppedSlowMessages: number
   readonly totalBytesIn: number
   readonly totalBytesOut: number
+  readonly rejectedOrigins: number
+  readonly rejectedIpLimits: number
   readonly netSim: NetSimConfig
 }
 
@@ -44,7 +51,8 @@ export interface WsControl {
   readonly wss: WebSocketServer
   readonly netSim: NetSimulator
   getStats(): WsStats
-  closeAllSockets(): Promise<void>
+  stopAccepting(): void
+  closeAllSockets(reason?: string): Promise<void>
 }
 
 function rawDataToBuffer(data: RawData): Buffer {
@@ -58,25 +66,125 @@ function byteLengthOf(payload: string | ArrayBuffer): number {
   return payload.byteLength
 }
 
+export function getClientIp(
+  req: IncomingMessage,
+  trustProxy: boolean,
+): string {
+  if (trustProxy) {
+    const fwd = req.headers['x-forwarded-for']
+    const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0]
+    const trimmed = first?.trim()
+    if (trimmed) return trimmed
+  }
+  return req.socket.remoteAddress ?? 'unknown'
+}
+
+export function isOriginAllowed(
+  originHeader: string | undefined,
+  allowedOrigins: readonly string[],
+): boolean {
+  if (originHeader === undefined) return true
+  const normalized = originHeader.trim().replace(/\/+$/, '').toLowerCase()
+  if (!normalized) return false
+  return (
+    allowedOrigins.includes('*') || allowedOrigins.includes(normalized)
+  )
+}
+
+function rejectUpgrade(
+  socket: Duplex,
+  statusCode: number,
+  statusText: string,
+): void {
+  if (!socket.destroyed) {
+    socket.write(
+      `HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+    )
+    socket.destroy()
+  }
+}
+
 export function attachWebSocketServer(
   httpServer: HttpServer,
-  { roomManager, config }: { roomManager: RoomManager; config: ServerConfig },
+  {
+    roomManager,
+    config,
+    logger,
+    metrics,
+  }: {
+    roomManager: RoomManager
+    config: ServerConfig
+    logger: ServerLogger
+    metrics: MetricsCollector
+  },
 ): WsControl {
   const wss = new WebSocketServer({
-    server: httpServer,
-    path: '/ws',
+    noServer: true,
     maxPayload: config.maxPayloadBytes,
   })
 
   const netSim = new NetSimulator()
   let nextPlayerId = 1
   const socketMeta = new Map<WebSocket, SocketMeta>()
+  const connectionsByIp = new Map<string, number>()
+  let accepting = true
   let droppedSlowMessages = 0
   let totalBytesIn = 0
   let totalBytesOut = 0
+  let rejectedOrigins = 0
+  let rejectedIpLimits = 0
 
   wss.on('error', (err) => {
-    console.error('[WSS] server error:', err.message)
+    logger.error({ err: err.message }, 'websocket server error')
+  })
+
+  httpServer.on('upgrade', (req, socket, head) => {
+    const url = new URL(
+      req.url ?? '/',
+      `http://${req.headers.host ?? 'localhost'}`,
+    )
+    if (url.pathname !== '/ws') {
+      rejectUpgrade(socket, 404, 'Not Found')
+      return
+    }
+
+    if (!accepting) {
+      rejectUpgrade(socket, 503, 'Service Unavailable')
+      return
+    }
+
+    const ip = getClientIp(req, config.trustProxy)
+    const origin = req.headers.origin
+    if (!isOriginAllowed(origin, config.allowedOrigins)) {
+      rejectedOrigins += 1
+      logger.warn({ ip, origin }, 'ws upgrade rejected: origin not allowed')
+      rejectUpgrade(socket, 403, 'Forbidden')
+      return
+    }
+
+    const activeFromIp = connectionsByIp.get(ip) ?? 0
+    if (activeFromIp >= config.maxConnectionsPerIp) {
+      rejectedIpLimits += 1
+      logger.warn(
+        { ip, activeFromIp, limit: config.maxConnectionsPerIp },
+        'ws upgrade rejected: per-ip connection limit reached',
+      )
+      rejectUpgrade(socket, 429, 'Too Many Requests')
+      return
+    }
+
+    if (roomManager.totalPlayers() >= config.maxTotalPlayers) {
+      logger.warn(
+        { ip, totalPlayers: roomManager.totalPlayers() },
+        'ws upgrade rejected: server player capacity reached',
+      )
+      rejectUpgrade(socket, 503, 'Server Full')
+      return
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req)
+    })
   })
 
   function safeSend(
@@ -88,6 +196,16 @@ export function attachWebSocketServer(
 
     if (socket.bufferedAmount > config.slowClientThresholdBytes) {
       if (socket.bufferedAmount > config.slowClientThresholdBytes * 4) {
+        const meta = socketMeta.get(socket)
+        logger.warn(
+          {
+            roomId: meta?.room?.id,
+            playerId: meta?.player?.id,
+            ip: meta?.ip,
+            bufferedAmount: socket.bufferedAmount,
+          },
+          'closing slow client due to buffer overflow',
+        )
         socket.close(4009, 'Slow client buffer overflow')
         return false
       }
@@ -97,7 +215,9 @@ export function attachWebSocketServer(
       }
     }
 
-    totalBytesOut += byteLengthOf(payload)
+    const bytes = byteLengthOf(payload)
+    totalBytesOut += bytes
+    metrics.recordMessageOut(bytes)
     socket.send(payload)
     return true
   }
@@ -149,8 +269,13 @@ export function attachWebSocketServer(
     for (const [socket, meta] of socketMeta) {
       if (socket.readyState !== WebSocket.OPEN) continue
       if (meta.missedPongs >= 2) {
-        console.warn(
-          `[WS] heartbeat timeout for ${meta.player?.name ?? 'unjoined'}`,
+        logger.warn(
+          {
+            roomId: meta.room?.id,
+            playerId: meta.player?.id,
+            ip: meta.ip,
+          },
+          'ws heartbeat timeout, terminating socket',
         )
         socket.terminate()
         continue
@@ -159,11 +284,16 @@ export function attachWebSocketServer(
       socket.ping()
     }
   }, config.heartbeatIntervalMs)
+  heartbeatTimer.unref()
 
-  wss.on('connection', (socket) => {
+  wss.on('connection', (socket, req) => {
+    const ip = getClientIp(req, config.trustProxy)
+    connectionsByIp.set(ip, (connectionsByIp.get(ip) ?? 0) + 1)
+
     const meta: SocketMeta = {
       player: null,
       room: null,
+      ip,
       missedPongs: 0,
       bucket: new TokenBucket(
         config.rateLimitPerSec,
@@ -171,6 +301,7 @@ export function attachWebSocketServer(
       ),
       joinTimer: setTimeout(() => {
         if (!meta.player && socket.readyState === WebSocket.OPEN) {
+          logger.warn({ ip }, 'ws join timeout')
           safeSend(socket, makeError('Join timeout (5s)'), { critical: true })
           socket.close(4001, 'Join timeout')
         }
@@ -180,7 +311,15 @@ export function attachWebSocketServer(
     socketMeta.set(socket, meta)
 
     socket.on('error', (err) => {
-      console.error('[WS] socket error:', err.message)
+      logger.error(
+        {
+          roomId: meta.room?.id,
+          playerId: meta.player?.id,
+          ip: meta.ip,
+          err: err.message,
+        },
+        'ws socket error',
+      )
     })
 
     socket.on('pong', () => {
@@ -190,8 +329,13 @@ export function attachWebSocketServer(
     socket.on('message', (data, isBinary) => {
       const buf = rawDataToBuffer(data)
       totalBytesIn += buf.byteLength
+      metrics.recordMessageIn(buf.byteLength)
 
       if (!meta.bucket.take(1)) {
+        logger.warn(
+          { roomId: meta.room?.id, playerId: meta.player?.id, ip: meta.ip },
+          'ws rate limit exceeded',
+        )
         safeSend(socket, makeError('Rate limit exceeded'), { critical: true })
         socket.close(4008, 'Rate limit exceeded')
         return
@@ -210,8 +354,14 @@ export function attachWebSocketServer(
         } catch (err: unknown) {
           const reason =
             err instanceof Error ? err.message : 'Invalid binary input'
-          console.warn(
-            `[WS] invalid binary input from ${meta.player.name}: ${reason}`,
+          logger.warn(
+            {
+              roomId: meta.room.id,
+              playerId: meta.player.id,
+              ip: meta.ip,
+              reason,
+            },
+            'invalid binary input frame',
           )
           safeSend(socket, makeError(reason), { critical: true })
           socket.close(1008, 'Invalid binary input')
@@ -227,8 +377,15 @@ export function attachWebSocketServer(
 
       const parsed = parseClientMessage(buf.toString('utf8'))
       if (!parsed.ok) {
-        console.warn(
-          `[WS] invalid client message from ${meta.player?.name ?? 'unjoined'} (${parsed.code}): ${parsed.reason}`,
+        logger.warn(
+          {
+            roomId: meta.room?.id,
+            playerId: meta.player?.id,
+            ip: meta.ip,
+            code: parsed.code,
+            reason: parsed.reason,
+          },
+          'invalid client json message',
         )
         safeSend(socket, makeError(parsed.reason), { critical: true })
         socket.close(parsed.code, parsed.reason)
@@ -277,6 +434,14 @@ export function attachWebSocketServer(
             return
           }
 
+          if (roomManager.totalPlayers() >= config.maxTotalPlayers) {
+            safeSend(socket, makeError('Server player limit reached'), {
+              critical: true,
+            })
+            socket.close(4003, 'Server full')
+            return
+          }
+
           const room = roomManager.get(msg.room)
           if (!room) {
             safeSend(socket, makeError(`Room "${msg.room}" not found`), {
@@ -309,6 +474,17 @@ export function attachWebSocketServer(
           meta.joinTimer = null
           meta.player = player
           meta.room = room
+
+          logger.info(
+            {
+              roomId: room.id,
+              playerId: player.id,
+              shipId: player.shipId,
+              ip: meta.ip,
+              codec: player.codec,
+            },
+            'player joined room',
+          )
 
           safeSend(socket, makeWelcome(player, room, match.tick), {
             critical: true,
@@ -370,6 +546,10 @@ export function attachWebSocketServer(
             return
           }
           const entry = meta.room.chat(meta.player, msg.text)
+          logger.info(
+            { roomId: meta.room.id, playerId: meta.player.id },
+            'room chat message',
+          )
           broadcastRoom(meta.room, makeChat(entry))
           return
         }
@@ -383,7 +563,15 @@ export function attachWebSocketServer(
       if (meta.joinTimer) clearTimeout(meta.joinTimer)
       socketMeta.delete(socket)
 
+      const remaining = (connectionsByIp.get(meta.ip) ?? 1) - 1
+      if (remaining <= 0) connectionsByIp.delete(meta.ip)
+      else connectionsByIp.set(meta.ip, remaining)
+
       if (meta.player && meta.room) {
+        logger.info(
+          { roomId: meta.room.id, playerId: meta.player.id, ip: meta.ip },
+          'player disconnected',
+        )
         meta.room.match?.removePlayer(meta.player.shipId)
         const left = meta.room.leave(meta.player.id)
         if (left) {
@@ -403,15 +591,23 @@ export function attachWebSocketServer(
         droppedSlowMessages,
         totalBytesIn,
         totalBytesOut,
+        rejectedOrigins,
+        rejectedIpLimits,
         netSim: netSim.getConfig(),
       }
     },
-    async closeAllSockets(): Promise<void> {
+    stopAccepting(): void {
+      accepting = false
+    },
+    async closeAllSockets(reason = 'Server shutting down'): Promise<void> {
+      accepting = false
       clearInterval(heartbeatTimer)
+      const shutdownPayload = makeShutdown(reason)
       for (const [socket, meta] of socketMeta) {
         if (meta.joinTimer) clearTimeout(meta.joinTimer)
         if (socket.readyState === WebSocket.OPEN) {
-          socket.close(1001, 'Server shutting down')
+          safeSend(socket, shutdownPayload, { critical: true })
+          socket.close(1001, reason)
         }
       }
       await new Promise<void>((resolve) => wss.close(() => resolve()))

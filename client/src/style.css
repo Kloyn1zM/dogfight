@@ -428,3 +428,63 @@ body {
 .np-presets button:hover {
   border-color: #38bdf8;
 }
+
+.touch-controls {
+  position: fixed;
+  inset: auto 0 18px 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 0 18px;
+  pointer-events: none;
+  z-index: 20;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tc-group {
+  display: flex;
+  gap: 10px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.tc-btn {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 189, 248, 0.55);
+  background: rgba(15, 23, 42, 0.72);
+  color: #e5e7eb;
+  font: bold 15px ui-monospace, SFMono-Regular, Menlo, monospace;
+  touch-action: none;
+  display: grid;
+  place-items: center;
+}
+
+.tc-btn.tc-fire {
+  width: 72px;
+  height: 72px;
+  border-color: rgba(250, 204, 21, 0.75);
+  color: #facc15;
+}
+
+.tc-btn.tc-homing {
+  border-color: rgba(192, 132, 252, 0.75);
+  color: #c084fc;
+}
+
+.tc-btn.active {
+  background: rgba(56, 189, 248, 0.35);
+  transform: scale(0.95);
+}
+
+@media (max-width: 760px) {
+  .net-panel {
+    display: none;
+  }
+  .room-panel {
+    bottom: 96px;
+    width: min(260px, 85vw);
+  }
+}

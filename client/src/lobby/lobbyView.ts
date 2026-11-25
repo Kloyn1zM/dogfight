@@ -4,7 +4,7 @@ import type { Lobby } from './lobby.ts'
 import { requireEl } from '../dom.ts'
 
 export interface LobbyViewHandle {
-  show(): void
+  show(notice?: string): void
   hide(): void
   destroy(): void
 }
@@ -25,7 +25,7 @@ export function mountLobbyView(
     <div class="lobby-card">
       <div class="lobby-header">
         <h1>DOGFIGHT</h1>
-        <span class="badge">Lab 07 · V8 &amp; Tests</span>
+        <span class="badge">v1.0.0 · Lab 08</span>
       </div>
       <label class="field">
         <span>Позивний пілота</span>
@@ -139,7 +139,8 @@ export function mountLobbyView(
   ]
 
   return {
-    show() {
+    show(notice?: string) {
+      if (notice) statusEl.textContent = notice
       container.classList.remove('hidden')
     },
     hide() {

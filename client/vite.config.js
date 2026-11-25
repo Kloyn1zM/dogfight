@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { defineConfig } from 'vite'
 
 function devLabMiddleware() {
@@ -39,6 +40,14 @@ function devLabMiddleware() {
 }
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@dogfight/shared': path.resolve(
+        import.meta.dirname,
+        '../shared/src/index.ts',
+      ),
+    },
+  },
   plugins: [devLabMiddleware()],
   server: {
     proxy: {
@@ -47,6 +56,14 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/health': {
+        target: 'http://127.0.0.1:3000',
+        changeOrigin: true,
+      },
+      '/ready': {
+        target: 'http://127.0.0.1:3000',
+        changeOrigin: true,
+      },
+      '/metrics': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
       },

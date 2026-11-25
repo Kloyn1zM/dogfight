@@ -73,3 +73,10 @@ export function makeError(reason: string): string {
     reason,
   })
 }
+
+export function makeShutdown(reason: string): string {
+  return encodeJsonMessage({
+    type: 'shutdown',
+    reason,
+  })
+}

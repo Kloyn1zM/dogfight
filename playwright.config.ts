@@ -30,7 +30,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'node --import tsx server/src/index.ts',
+    command: 'node server/dist/index.js',
     url: 'http://127.0.0.1:3107/health',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
@@ -38,6 +38,7 @@ export default defineConfig({
       PORT: '3107',
       HOST: '127.0.0.1',
       LOG_DIR: 'logs-e2e',
+      LOG_LEVEL: 'silent',
       MAX_PLAYERS_PER_ROOM: '16',
     },
   },

@@ -202,6 +202,11 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     v: VersionSchema,
+    type: z.literal('shutdown'),
+    reason: z.string().min(1),
+  }),
+  z.object({
+    v: VersionSchema,
     type: z.literal('pong'),
     t: z.number().finite(),
   }),

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { PassThrough, Transform, type TransformCallback } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { Room, RoomLogEvent } from '../rooms.ts'
+import type { ServerLogger } from '../logger.ts'
 
 export interface MatchLogHandle {
   readonly id: string
@@ -28,7 +29,11 @@ export class JsonLinesTransform extends Transform {
   }
 }
 
-export function createMatchLog(room: Room, logDir: string): MatchLogHandle {
+export function createMatchLog(
+  room: Room,
+  logDir: string,
+  logger?: ServerLogger,
+): MatchLogHandle {
   mkdirSync(logDir, { recursive: true })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const safeRoom = room.id.replace(/[^a-z0-9_-]/gi, '')
@@ -41,7 +46,7 @@ export function createMatchLog(room: Room, logDir: string): MatchLogHandle {
 
   const done = pipeline(source, transform, fileStream).catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error(`[MatchLog] pipeline error (${id}):`, msg)
+    logger?.error({ roomId: room.id, logId: id, err: msg }, 'matchlog pipeline error')
   })
 
   let closed = false

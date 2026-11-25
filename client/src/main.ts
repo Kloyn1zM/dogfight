@@ -44,6 +44,7 @@ import { GameConnection } from './net/connection.ts'
 import { NetWorld } from './net/netWorld.ts'
 import { mountRoomPanel } from './ui/roomPanel.ts'
 import { mountNetPanel } from './ui/netPanel.ts'
+import { mountTouchControls } from './ui/touchControls.ts'
 import { requireEl } from './dom.ts'
 import { createFramePerfRecorder, type PerfReport } from './perf.ts'
 
@@ -86,6 +87,7 @@ const lobbyOverlay = requireEl(document, '#lobby-overlay', HTMLElement)
 const loadingControls = requireEl(document, '#loading-controls', HTMLElement)
 const roomPanelEl = requireEl(document, '#room-panel', HTMLElement)
 const netPanelEl = requireEl(document, '#net-panel', HTMLElement)
+const touchControlsEl = requireEl(document, '#touch-controls', HTMLElement)
 
 const params = new URLSearchParams(window.location.search)
 const devDelayMs = Number(params.get('delay') ?? 0)
@@ -128,6 +130,7 @@ audio.attachBus(netWorld.events)
 const connection = new GameConnection()
 const roomPanel = mountRoomPanel(roomPanelEl, connection)
 const netPanel = mountNetPanel(netPanelEl, { connection, netWorld })
+const touchControls = mountTouchControls(touchControlsEl)
 
 const command: LocalCommand = {
   turn: 0,
@@ -194,8 +197,15 @@ connection.events.on('events', (msg) => {
   netWorld.onServerEvents(msg.events)
 })
 
+connection.events.on('fatalDisconnect', ({ reason }) => {
+  if (mode === 'playing') {
+    returnToLobby(reason)
+  }
+})
+
 function simulate(dt: number): void {
   readShipCommand(input, command)
+  touchControls.applyToCommand(command)
   if (pointerFirePending) {
     command.fire = true
     pointerFirePending = false
@@ -259,6 +269,7 @@ function startPlaying(assets: LoadedAssets): void {
   perfRecorder.reset()
   roomPanel.show(activeRoom?.name)
   netPanel.show()
+  touchControls.show()
   if (activeRoom) {
     connection.connect({
       room: activeRoom.id,
@@ -367,12 +378,13 @@ async function beginLoadingAndPlay({
 const lobby = new Lobby({ endpoint: '/api/rooms' })
 const lobbyView = mountLobbyView(lobbyOverlay, lobby)
 
-function returnToLobby(): void {
+function returnToLobby(notice?: string): void {
   loadController?.abort()
   connection.disconnect()
   netWorld.reset()
   roomPanel.hide()
   netPanel.hide()
+  touchControls.hide()
   loop.stop()
   input.clear()
   setLoadingControls('')
@@ -380,7 +392,7 @@ function returnToLobby(): void {
   drawBackground(ctx, size.w, size.h)
   drawGrid(ctx, size.w, size.h)
   drawStarfield(ctx, bgStars)
-  lobbyView.show()
+  lobbyView.show(notice)
   lobby.startPolling(5000)
 }
 
@@ -407,3 +419,11 @@ window.addEventListener('keydown', (e) => {
     returnToLobby()
   }
 })
+
+if ('serviceWorker' in navigator && !import.meta.env.DEV) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js').catch((err: unknown) => {
+      console.warn('[PWA] service worker registration failed:', err)
+    })
+  })
+}

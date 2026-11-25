@@ -29,10 +29,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit & property tests with coverage (shared >= 85%)
+      - name: Unit, property & fault tests with coverage (shared >= 85%)
         run: npm run test:coverage
 
-      - name: Build client
+      - name: Build shared, server, and client
         run: npm run build
 
       - name: Install Playwright Chromium
@@ -40,3 +40,37 @@ jobs:
 
       - name: Playwright E2E (2 browsers multiplayer & chat)
         run: npm run test:e2e
+
+      - name: Verify 2-stage Docker image (< 200 MB, non-root, /health, SIGTERM < 10s)
+        run: |
+          docker build --build-arg GIT_SHA="${{ github.sha }}" -t dogfight:ci .
+          IMAGE_BYTES=$(docker image inspect dogfight:ci --format='{{.Size}}')
+          IMAGE_MB=$((IMAGE_BYTES / 1024 / 1024))
+          echo "Docker image size: ${IMAGE_MB} MB (${IMAGE_BYTES} bytes)"
+          test "$IMAGE_BYTES" -lt 209715200
+
+          CONTAINER_USER=$(docker run --rm --entrypoint id dogfight:ci -un)
+          echo "Container user: ${CONTAINER_USER}"
+          test "$CONTAINER_USER" = "node"
+
+          docker run -d --name dogfight-ci-test -p 3000:3000 -e ALLOWED_ORIGINS="http://localhost:3000" dogfight:ci
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3000/health | grep -q "${{ github.sha }}"; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:3000/health | grep -q "${{ github.sha }}"
+          curl -fsS http://127.0.0.1:3000/ready | grep -q '"ready":true'
+          curl -fsS http://127.0.0.1:3000/metrics | grep -q 'dogfight_event_loop_utilization'
+
+          START_SEC=$(date +%s)
+          docker stop -t 10 dogfight-ci-test
+          END_SEC=$(date +%s)
+          ELAPSED=$((END_SEC - START_SEC))
+          EXIT_CODE=$(docker inspect dogfight-ci-test --format='{{.State.ExitCode}}')
+          echo "docker stop elapsed=${ELAPSED}s exitCode=${EXIT_CODE}"
+          docker logs dogfight-ci-test
+          docker rm dogfight-ci-test
+          test "$ELAPSED" -lt 10
+          test "$EXIT_CODE" -eq 0

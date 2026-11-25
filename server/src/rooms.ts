@@ -9,6 +9,7 @@ import type {
   RosterEntry,
 } from '@dogfight/shared'
 import { createMatchLog, type MatchLogHandle } from './log/matchlog.ts'
+import type { ServerLogger } from './logger.ts'
 import type { Match } from './match.ts'
 
 const ARENA_PRESETS: Readonly<Record<Difficulty, ArenaConfig>> = {
@@ -195,19 +196,23 @@ export class RoomManager {
   readonly maxRooms: number
   readonly maxPlayersPerRoom: number
   readonly logDir: string | null
+  readonly #logger?: ServerLogger
 
   constructor({
     maxRooms = 20,
-    maxPlayersPerRoom = 8,
+    maxPlayersPerRoom = 16,
     logDir = null,
+    logger,
   }: {
     maxRooms?: number
     maxPlayersPerRoom?: number
     logDir?: string | null
+    logger?: ServerLogger
   } = {}) {
     this.maxRooms = maxRooms
     this.maxPlayersPerRoom = maxPlayersPerRoom
     this.logDir = logDir
+    this.#logger = logger
   }
 
   get size(): number {
@@ -287,13 +292,13 @@ export class RoomManager {
     })
 
     room.on('error', (err) => {
-      console.error(`[Room:${room.id}] error:`, err.message)
+      this.#logger?.error({ roomId: room.id, err: err.message }, 'room error')
     })
 
     this.#rooms.set(room.id, room)
 
     if (this.logDir) {
-      const log = createMatchLog(room, this.logDir)
+      const log = createMatchLog(room, this.logDir, this.#logger)
       this.#logs.set(room.id, log)
       room.recordEvent('room.created', {
         name: room.name,

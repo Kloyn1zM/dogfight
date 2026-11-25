@@ -36,6 +36,8 @@ export type ConnectionEvents = {
   system: Extract<ServerMessage, { type: 'system' }>
   events: Extract<ServerMessage, { type: 'events' }>
   error: Extract<ServerMessage, { type: 'error' }>
+  shutdown: Extract<ServerMessage, { type: 'shutdown' }>
+  fatalDisconnect: { reason: string; code?: number }
   codec: Extract<ServerMessage, { type: 'codec' }>
   netcfg: Extract<ServerMessage, { type: 'netcfg' }>
   snapshot: { snapshot: Snapshot; receivedAt: number }
@@ -64,6 +66,8 @@ export class GameConnection {
   #pingTimer = 0
   #bwTimer = 0
   #attempt = 0
+  #maxReconnectAttempts = 3
+  #serverShuttingDown = false
   #status: ConnectionStatus = 'closed'
 
   #codec: Codec = binaryCodec
@@ -105,6 +109,7 @@ export class GameConnection {
   }): void {
     this.disconnect()
     this.#manualClose = false
+    this.#serverShuttingDown = false
     this.#attempt = 0
     this.#codec = codec === 'json' ? jsonCodec : binaryCodec
     this.#joinPayload = { type: 'join', room, name, codec: this.#codec.name }
@@ -322,6 +327,14 @@ export class GameConnection {
         case 'error':
           this.events.emit('error', msg)
           return
+        case 'shutdown':
+          this.#serverShuttingDown = true
+          this.events.emit('shutdown', msg)
+          this.events.emit('fatalDisconnect', {
+            reason: msg.reason,
+            code: 1001,
+          })
+          return
         case 'codec':
           this.events.emit('codec', msg)
           return
@@ -341,8 +354,28 @@ export class GameConnection {
       if (this.#socket !== socket) return
       this.#socket = null
 
-      if (this.#manualClose || event.code === 4003 || event.code === 4004) {
+      if (
+        this.#manualClose ||
+        this.#serverShuttingDown ||
+        event.code === 4003 ||
+        event.code === 4004
+      ) {
         this.#setStatus('closed', { code: event.code, reason: event.reason })
+        if (!this.#manualClose && !this.#serverShuttingDown) {
+          this.events.emit('fatalDisconnect', {
+            reason: event.reason || `З'єднання закрито (${event.code})`,
+            code: event.code,
+          })
+        }
+        return
+      }
+
+      if (this.#attempt >= this.#maxReconnectAttempts) {
+        this.#setStatus('closed', { code: event.code, reason: event.reason })
+        this.events.emit('fatalDisconnect', {
+          reason: 'Сервер недоступний — повернення в лобі',
+          code: event.code,
+        })
         return
       }
 
