@@ -6,9 +6,8 @@
 
 Мультиплеєрна 2D космічна арена в реальному часі (клієнт на Canvas 2D + Web Audio + PWA, авторитетний сервер на Node.js 22 + WebSocket binary protocol, спільна детермінована симуляція на суворому TypeScript).
 
-- **Жива адреса (`https://` + `wss://`):** `<!-- TODO: вставити Render URL після деплою, напр. https://dogfight.onrender.com -->`
-- **Демо-відео (3–5 хв):** `<!-- TODO: вставити посилання на відео після запису -->`
-- **Реальний RTT (дві різні мережі):** `<!-- TODO: вписати заміряний RTT двох гравців із різних мереж -->`
+- **Жива адреса (`https://` + `wss://`):** [https://dogfight-6lrf.onrender.com](https://dogfight-6lrf.onrender.com) *(ендпоїнти: [`/health`](https://dogfight-6lrf.onrender.com/health), [`/ready`](https://dogfight-6lrf.onrender.com/ready), [`/metrics`](https://dogfight-6lrf.onrender.com/metrics))*
+- **Реальний RTT (дві різні мережі — ПК Wi-Fi + iPhone LTE PWA):** **`47–50 ms`** (ПК Wi-Fi) / **`68–82 ms`** (iPhone LTE, стабільні 60 FPS і 30 Hz `wss://` у спільній кімнаті)
 
 ### Як грати
 - **ПК:** `W` / `↑` — тяга, `A` / `D` або `←` / `→` — поворот, `Пробіл` або ЛКМ — постріл, `E` — самонавідна ракета, `M` — звук, `Esc` — повернутися в лобі.
@@ -518,4 +517,12 @@ Event-loop jitter p99 vs кількість headless WS-клієнтів (бюд
 - **2-етапний `Dockerfile` та реліз за тегом `v*` (`.github/workflows/release.yml`):**
   - Компіляція `shared/` і `server/` у чистий ESM JS (`dist/`), фінальний образ `node:22-alpine` без `devDependencies` і `tsx`, `USER node` (non-root), `HEALTHCHECK`, запуск напряму `CMD ["node", "server/dist/index.js"]`, розмір **`< 200 MB`** (перевіряється в CI).
   - При пуші тегу `v*` GitHub Actions збирає образ із `GIT_SHA`, публікує в GHCR (`ghcr.io/kloyn1zm/dogfight`) і тригерить деплой на Render через Deploy Hook із автоматичним `wss://`.
-- **PWA (`manifest.webmanifest`, `sw.js`, PNG-іконки `192×192` і `512×512`, `client/src/ui/touchControls.ts`):** гра встановлюється на телефон як standalone-додаток із сенсорним керуванням.
+- **PWA (`manifest.webmanifest`, `sw.js`, PNG-іконки `192×192` і `512×512`, `client/src/ui/touchControls.ts`):** гра встановлюється на телефон як standalone-додаток із сенсорним керуванням, кнопкою виходу в лобі, згортанням чату, скролом лобі в landscape та відображенням RTT у HUD.
+
+#### Перевірка деплою (`wss://` + Service Worker) та встановлений PWA на iPhone (дві різні мережі)
+
+![Render HTTPS/WSS 101 and ServiceWorker verification](docs/network-check.png)
+
+| Лобі на iPhone (LTE) | Standalone PWA: гра (`RTT 82 ms`, 60 FPS) | Standalone PWA: живий чат із ПК (`RTT 68 ms`) |
+|---|---|---|
+| ![Mobile PWA Lobby](docs/phone-lobby.png) | ![Mobile PWA Arena](docs/phone-room-fixed.png) | ![Mobile PWA Chat](docs/phone-room-with-chat.png) |
