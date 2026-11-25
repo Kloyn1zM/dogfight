@@ -128,7 +128,9 @@ const audio = createAudioManager()
 audio.attachBus(netWorld.events)
 
 const connection = new GameConnection()
-const roomPanel = mountRoomPanel(roomPanelEl, connection)
+const roomPanel = mountRoomPanel(roomPanelEl, connection, {
+  onLeave: () => returnToLobby(),
+})
 const netPanel = mountNetPanel(netPanelEl, { connection, netWorld })
 const touchControls = mountTouchControls(touchControlsEl)
 
@@ -235,6 +237,8 @@ function render(alpha: number, stats: LoopStats): void {
     playerName: activePlayerName,
     roomName: activeRoom?.name ?? 'Arena',
     muted: audio.isMuted(),
+    rttMs: connection.getNetStats().rttMs,
+    isTouch: touchControls.isTouch,
     perfText: perfRecorder.getStatusText(now),
   })
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dogfight-v1'
+const CACHE_NAME = 'dogfight-v2'
 const APP_SHELL = [
   '/',
   '/manifest.webmanifest',

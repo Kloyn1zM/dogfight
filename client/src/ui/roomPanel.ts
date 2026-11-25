@@ -11,37 +11,63 @@ export interface RoomPanelHandle {
 export function mountRoomPanel(
   container: HTMLElement,
   connection: GameConnection,
+  { onLeave }: { onLeave?: () => void } = {},
 ): RoomPanelHandle {
   let myPlayerId: string | null = null
+  let collapsed = false
 
   container.innerHTML = `
     <div class="rp-header">
       <strong id="rp-room-name">Кімната</strong>
-      <span id="rp-status" class="rp-status">OFFLINE</span>
+      <div class="rp-actions">
+        <span id="rp-status" class="rp-status">OFFLINE</span>
+        <button id="rp-toggle" class="rp-btn" type="button" title="Згорнути/розгорнути чат">−</button>
+        <button id="rp-leave" class="rp-btn rp-btn-leave" type="button" title="Повернутися в лобі">Лобі</button>
+      </div>
     </div>
-    <div class="rp-section-title">Гравці (<span id="rp-count">0</span>)</div>
-    <ul id="rp-roster" class="rp-roster"></ul>
-    <div class="rp-section-title">Чат кімнати</div>
-    <div id="rp-messages" class="rp-messages"></div>
-    <form id="rp-chat-form" class="rp-form">
-      <input
-        id="rp-chat-input"
-        type="text"
-        maxlength="200"
-        autocomplete="off"
-        placeholder="Написати в чат (Enter)..."
-      />
-      <button type="submit">Send</button>
-    </form>
+    <div class="rp-body">
+      <div class="rp-section-title">Гравці (<span id="rp-count">0</span>)</div>
+      <ul id="rp-roster" class="rp-roster"></ul>
+      <div class="rp-section-title">Чат кімнати</div>
+      <div id="rp-messages" class="rp-messages"></div>
+      <form id="rp-chat-form" class="rp-form">
+        <input
+          id="rp-chat-input"
+          type="text"
+          maxlength="200"
+          autocomplete="off"
+          placeholder="Написати в чат (Enter)..."
+        />
+        <button type="submit">Send</button>
+      </form>
+    </div>
   `
 
   const roomNameEl = requireEl(container, '#rp-room-name', HTMLElement)
   const statusEl = requireEl(container, '#rp-status', HTMLElement)
+  const toggleBtn = requireEl(container, '#rp-toggle', HTMLButtonElement)
+  const leaveBtn = requireEl(container, '#rp-leave', HTMLButtonElement)
   const countEl = requireEl(container, '#rp-count', HTMLElement)
   const rosterEl = requireEl(container, '#rp-roster', HTMLUListElement)
   const messagesEl = requireEl(container, '#rp-messages', HTMLElement)
   const chatForm = requireEl(container, '#rp-chat-form', HTMLFormElement)
   const chatInput = requireEl(container, '#rp-chat-input', HTMLInputElement)
+
+  function setCollapsed(next: boolean): void {
+    collapsed = next
+    container.classList.toggle('collapsed', collapsed)
+    toggleBtn.textContent = collapsed ? '+' : '−'
+  }
+
+  toggleBtn.addEventListener('click', () => {
+    setCollapsed(!collapsed)
+    toggleBtn.blur()
+  })
+
+  leaveBtn.addEventListener('click', () => {
+    leaveBtn.blur()
+    onLeave?.()
+  })
 
   function appendLine({
     author = '',
@@ -153,6 +179,9 @@ export function mountRoomPanel(
       messagesEl.innerHTML = ''
       rosterEl.innerHTML = ''
       countEl.textContent = '0'
+      const compactScreen =
+        window.innerWidth < 900 || window.innerHeight < 520
+      setCollapsed(compactScreen)
       container.classList.remove('hidden')
     },
     hide() {

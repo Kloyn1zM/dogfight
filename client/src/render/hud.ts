@@ -16,6 +16,8 @@ export interface HudController {
       playerName?: string
       roomName?: string
       muted?: boolean
+      rttMs?: number
+      isTouch?: boolean
       perfText?: string | null
     },
   ): void
@@ -51,11 +53,15 @@ export function createHud(netWorld: NetWorld): HudController {
       playerName = 'Pilot',
       roomName = 'Arena',
       muted = false,
+      rttMs = 0,
+      isTouch = false,
       perfText = null,
     }: {
       playerName?: string
       roomName?: string
       muted?: boolean
+      rttMs?: number
+      isTouch?: boolean
       perfText?: string | null
     } = {},
   ): void {
@@ -73,7 +79,11 @@ export function createHud(netWorld: NetWorld): HudController {
     ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx.fillText(`steps/s   ${stats.stepsPerSecond} (30 Hz net)`, 20, 30)
     ctx.fillText(`frames/s  ${stats.framesPerSecond}`, 20, 50)
-    ctx.fillText(`frame ms  ${stats.frameTimeMs.toFixed(2)}`, 20, 70)
+    ctx.fillText(
+      `frame ms  ${stats.frameTimeMs.toFixed(2)}${rttMs > 0 ? ` · RTT ${rttMs.toFixed(0)} ms` : ''}`,
+      20,
+      70,
+    )
 
     ctx.fillStyle = '#38bdf8'
     ctx.fillText(`${playerName} @ ${roomName}`, 20, 98)
@@ -117,12 +127,14 @@ export function createHud(netWorld: NetWorld): HudController {
       ctx.fillText(perfText, 20, ctx.canvas.clientHeight - 40)
     }
 
-    ctx.fillStyle = '#9ca3af'
-    ctx.fillText(
-      `W/A/D — політ · Пробіл/Клік — постріл · E — homing · M — звук(${muted ? 'OFF' : 'ON'}) · Esc — лобі`,
-      20,
-      ctx.canvas.clientHeight - 18,
-    )
+    if (!isTouch) {
+      ctx.fillStyle = '#9ca3af'
+      ctx.fillText(
+        `W/A/D — політ · Пробіл/Клік — постріл · E — homing · M — звук(${muted ? 'OFF' : 'ON'}) · Esc — лобі`,
+        20,
+        ctx.canvas.clientHeight - 18,
+      )
+    }
   }
 
   function destroy(): void {

@@ -1,6 +1,7 @@
 import type { LocalCommand } from '../input.ts'
 
 export interface TouchControlsHandle {
+  readonly isTouch: boolean
   show(): void
   hide(): void
   applyToCommand(command: LocalCommand): void
@@ -75,9 +76,12 @@ export function mountTouchControls(
   container.addEventListener('pointerup', releasePointer)
   container.addEventListener('pointercancel', releasePointer)
 
+  const touch = isTouchDevice()
+
   return {
+    isTouch: touch,
     show() {
-      if (isTouchDevice()) {
+      if (touch) {
         container.classList.remove('hidden')
       }
     },
